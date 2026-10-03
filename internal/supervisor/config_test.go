@@ -121,3 +121,57 @@ func TestEnvironmentRejectsUnsafeAndInvalidSettings(t *testing.T) {
 		t.Fatalf("explicit public IPv6 opt-in: %+v %v", c, err)
 	}
 }
+
+func TestTransportsDefaultToHTTP2Setting(t *testing.T) {
+	c, err := FromEnvironment(func(k string) string { return map[string]string{"USQUE_HTTP2": "true"}[k] })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(c.Transports) != 1 || c.Transports[0] != (Transport{HTTP2: true, Port: 443}) {
+		t.Fatalf("unexpected default transports: %+v", c.Transports)
+	}
+	if !slices.Contains(c.ChildArgs(), "--http2=true") || slices.Contains(c.ChildArgs(), "--connect-port") {
+		t.Fatalf("default transport must keep previous arguments: %v", c.ChildArgs())
+	}
+}
+
+func TestTransportsParseAndChildArguments(t *testing.T) {
+	c, err := FromEnvironment(func(k string) string {
+		return map[string]string{"USQUE_TRANSPORTS": "quic:443,http2:443,quic:4500"}[k]
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []Transport{{Port: 443}, {HTTP2: true, Port: 443}, {Port: 4500}}
+	if !slices.Equal(c.Transports, want) {
+		t.Fatalf("transports: %+v", c.Transports)
+	}
+	if got := c.Transports[2].String(); got != "quic:4500" {
+		t.Fatalf("transport name: %s", got)
+	}
+	args := c.ChildArgsFor(c.Transports[2])
+	if !slices.Contains(args, "--http2=false") || !slices.Contains(args, "--connect-port") || !slices.Contains(args, "4500") {
+		t.Fatalf("quic:4500 arguments: %v", args)
+	}
+	if args := c.ChildArgsFor(c.Transports[1]); !slices.Contains(args, "--http2=true") {
+		t.Fatalf("http2 arguments: %v", args)
+	}
+}
+
+func TestTransportsRejectInvalidValues(t *testing.T) {
+	for _, value := range []string{"quic", "quic:0", "quic:70000", "tcp:443", "quic:443,", ",quic:443", "quic:443 ,http2:443", "http2:abc",
+		strings.Repeat("quic:443,", 8) + "quic:443"} {
+		t.Run(value, func(t *testing.T) {
+			_, err := FromEnvironment(func(k string) string { return map[string]string{"USQUE_TRANSPORTS": value}[k] })
+			if err == nil {
+				t.Fatal("invalid transports accepted")
+			}
+		})
+	}
+	_, err := FromEnvironment(func(k string) string {
+		return map[string]string{"USQUE_MODE": "l4-socks", "USQUE_TRANSPORTS": "quic:443,http2:443"}[k]
+	})
+	if err == nil {
+		t.Fatal("l4-socks HTTP2 transport accepted")
+	}
+}

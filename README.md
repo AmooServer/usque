@@ -79,17 +79,20 @@ Use `sudoedit /etc/usque/service.env`, then `sudo usquectl restart`. Use simple 
 | Setting | Default |
 | --- | --- |
 | `USQUE_BIND`, `USQUE_PORT`, `USQUE_MODE` | `127.0.0.1`, `903`, `socks` |
-| `USQUE_HEALTH_INTERVAL`, `USQUE_HEALTH_TIMEOUT` | `20s`, `8s` |
-| `USQUE_HEALTH_FAILURES` | `3` consecutive failures |
+| `USQUE_HEALTH_INTERVAL`, `USQUE_HEALTH_TIMEOUT` | `5s`, `5s` in the shipped profile (`20s`, `8s` when unset) |
+| `USQUE_HEALTH_FAILURES` | `2` in the shipped profile (`3` when unset) |
 | `USQUE_DIAL_TIMEOUT`, `USQUE_SHUTDOWN_TIMEOUT` | `8s`, `8s` |
 | `USQUE_BACKOFF_MIN`, `USQUE_BACKOFF_MAX` | `1s`, `30s` with jitter |
 | `USQUE_HEALTHY_RESET` | `2m` sustained healthy probes |
 | `USQUE_ALWAYS_RECONNECT`, `USQUE_HTTP2` | `true`, `false` |
 | `USQUE_MTU` | `1280` |
+| `USQUE_TRANSPORTS` | `quic:443,http2:443,quic:4500` in the shipped profile (`USQUE_HTTP2` on port 443 when unset) |
 
-Probe intervals start after completion of the previous probe. Short interruptions can clear before three failures; repeated failures retain increased backoff until sustained health. Restarts interrupt existing connections.
+Probe intervals start after completion of the previous probe. With the shipped profile a stalled tunnel is replaced in about 15 seconds. Short interruptions can clear before the failure threshold; repeated failures retain increased backoff until sustained health. Restarts interrupt existing connections.
 
 Full `socks` is the production default for UDP workloads. Set `USQUE_MODE=l4-socks` only for TCP-only workloads: MTU/reconnect flags do not apply, and HTTP/2 is unavailable. Full `socks` supports `USQUE_HTTP2=true` for testing TCP/TLS when UDP/QUIC is problematic.
+
+`USQUE_TRANSPORTS` is a MASQUE failover list. The supervisor starts the first entry; after every restart (failed health checks or a child exit) the next child uses the next entry, wrapping around. A stalled QUIC path is therefore retried over HTTP/2 and then over QUIC on another port instead of the same path. `usquectl status` and `/run/usque/status.json` report the active `transport`. `l4-socks` accepts `quic:` entries only. Existing installations keep their `/etc/usque/service.env` on update; add the line yourself to enable failover.
 
 ## Xray, sing-box and Hysteria
 

@@ -29,7 +29,7 @@ load_env() {
     [[ $line =~ ^(USQUE_[A-Z0-9_]+)=(.*)$ ]] || { say 'Invalid service.env line; use KEY=value with no shell syntax.' >&2; return 1; }
     key=${BASH_REMATCH[1]}; value=${BASH_REMATCH[2]}
     case "$key" in
-      USQUE_CONFIG|USQUE_BINARY|USQUE_STATE|USQUE_BIND|USQUE_PORT|USQUE_MODE|USQUE_DNS|USQUE_ALLOW_PUBLIC|USQUE_HEALTH_URL|USQUE_HEALTH_INTERVAL|USQUE_HEALTH_TIMEOUT|USQUE_HEALTH_FAILURES|USQUE_DIAL_TIMEOUT|USQUE_SHUTDOWN_TIMEOUT|USQUE_BACKOFF_MIN|USQUE_BACKOFF_MAX|USQUE_HEALTHY_RESET|USQUE_ALWAYS_RECONNECT|USQUE_MTU|USQUE_HTTP2) ;;
+      USQUE_CONFIG|USQUE_BINARY|USQUE_STATE|USQUE_BIND|USQUE_PORT|USQUE_MODE|USQUE_DNS|USQUE_ALLOW_PUBLIC|USQUE_HEALTH_URL|USQUE_HEALTH_INTERVAL|USQUE_HEALTH_TIMEOUT|USQUE_HEALTH_FAILURES|USQUE_DIAL_TIMEOUT|USQUE_SHUTDOWN_TIMEOUT|USQUE_BACKOFF_MIN|USQUE_BACKOFF_MAX|USQUE_HEALTHY_RESET|USQUE_ALWAYS_RECONNECT|USQUE_MTU|USQUE_HTTP2|USQUE_TRANSPORTS) ;;
       *) say "Unsupported service.env key: $key" >&2; return 1 ;;
     esac
     # systemd EnvironmentFile and the management tool deliberately share this
@@ -269,6 +269,12 @@ switch_release() {
      ! grep -qw 'USQUE_DNS' "$next/deploy/lib.sh"; then
     say 'Target release does not support USQUE_DNS. Current release was not changed.' >&2
     say 'Back up /etc/usque/service.env, remove its USQUE_DNS line (restoring core DNS defaults), then retry rollback.' >&2
+    return 1
+  fi
+  if [[ -f $ETC/service.env ]] && grep -q '^USQUE_TRANSPORTS=.' "$ETC/service.env" &&
+     ! grep -qw 'USQUE_TRANSPORTS' "$next/deploy/lib.sh"; then
+    say 'Target release does not support USQUE_TRANSPORTS. Current release was not changed.' >&2
+    say 'Back up /etc/usque/service.env, remove its USQUE_TRANSPORTS line, then retry rollback.' >&2
     return 1
   fi
   if [[ -L $ROOT/previous ]]; then

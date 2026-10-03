@@ -19,6 +19,37 @@ type Config struct {
 	HTTP2, AlwaysReconnect, AllowPublic                  bool
 	HealthInterval, HealthTimeout, ShutdownTimeout       time.Duration
 	DialTimeout, BackoffMin, BackoffMax, HealthyReset    time.Duration
+	// Transports is the MASQUE failover order. The supervisor starts with the
+	// first entry and moves to the next one after each restart.
+	Transports []Transport
+}
+
+// Transport selects how the child reaches Cloudflare's MASQUE endpoint.
+type Transport struct {
+	HTTP2 bool
+	Port  int
+}
+
+func (t Transport) String() string {
+	protocol := "quic"
+	if t.HTTP2 {
+		protocol = "http2"
+	}
+	return protocol + ":" + strconv.Itoa(t.Port)
+}
+
+// ParseTransports reads a comma-separated list such as quic:443,http2:443,quic:4500.
+func ParseTransports(value string) ([]Transport, error) {
+	var transports []Transport
+	for _, entry := range strings.Split(value, ",") {
+		protocol, rawPort, ok := strings.Cut(entry, ":")
+		port, err := strconv.Atoi(rawPort)
+		if !ok || err != nil || port < 1 || port > 65535 || (protocol != "quic" && protocol != "http2") {
+			return nil, fmt.Errorf("USQUE_TRANSPORTS must be comma-separated quic:PORT or http2:PORT entries, for example quic:443,http2:443,quic:4500")
+		}
+		transports = append(transports, Transport{HTTP2: protocol == "http2", Port: port})
+	}
+	return transports, nil
 }
 
 // FromEnvironment validates the complete service profile before starting a child.
@@ -72,6 +103,15 @@ func FromEnvironment(getenv func(string) string) (Config, error) {
 			*dst = parsed
 		}
 	}
+	if value := getenv("USQUE_TRANSPORTS"); value != "" {
+		transports, err := ParseTransports(value)
+		if err != nil {
+			return c, err
+		}
+		c.Transports = transports
+	} else {
+		c.Transports = []Transport{{HTTP2: c.HTTP2, Port: 443}}
+	}
 	return c, c.Validate()
 }
 
@@ -95,6 +135,17 @@ func (c Config) Validate() error {
 	}
 	if c.Mode == "l4-socks" && c.HTTP2 {
 		return fmt.Errorf("l4-socks supports HTTP/3 only; select socks for USQUE_HTTP2=true")
+	}
+	if len(c.Transports) == 0 || len(c.Transports) > 8 {
+		return fmt.Errorf("USQUE_TRANSPORTS must contain 1..8 entries")
+	}
+	for _, t := range c.Transports {
+		if t.Port < 1 || t.Port > 65535 {
+			return fmt.Errorf("USQUE_TRANSPORTS ports must be 1..65535")
+		}
+		if c.Mode == "l4-socks" && t.HTTP2 {
+			return fmt.Errorf("l4-socks supports HTTP/3 only; remove http2 entries from USQUE_TRANSPORTS")
+		}
 	}
 	if len(c.DNS) > 8 {
 		return fmt.Errorf("USQUE_DNS accepts at most 8 comma-separated IP addresses")
@@ -138,10 +189,23 @@ func (c Config) SOCKSAddress() string {
 	return net.JoinHostPort(bind, strconv.Itoa(c.Port))
 }
 
+// ChildArgs returns the arguments for the first configured transport.
 func (c Config) ChildArgs() []string {
+	t := Transport{HTTP2: c.HTTP2, Port: 443}
+	if len(c.Transports) > 0 {
+		t = c.Transports[0]
+	}
+	return c.ChildArgsFor(t)
+}
+
+// ChildArgsFor returns the child arguments for one MASQUE transport.
+func (c Config) ChildArgsFor(t Transport) []string {
 	args := []string{"-c", c.ConfigPath, c.Mode, "-b", c.Bind, "-p", strconv.Itoa(c.Port), "--dial-timeout", c.DialTimeout.String()}
 	if c.Mode == "socks" {
-		args = append(args, "--mtu", strconv.Itoa(c.MTU), "--always-reconnect="+strconv.FormatBool(c.AlwaysReconnect), "--http2="+strconv.FormatBool(c.HTTP2))
+		args = append(args, "--mtu", strconv.Itoa(c.MTU), "--always-reconnect="+strconv.FormatBool(c.AlwaysReconnect), "--http2="+strconv.FormatBool(t.HTTP2))
+	}
+	if t.Port != 443 {
+		args = append(args, "--connect-port", strconv.Itoa(t.Port))
 	}
 	for _, server := range c.DNS {
 		args = append(args, "--dns", server)
