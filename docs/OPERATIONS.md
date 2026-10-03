@@ -68,7 +68,9 @@ not evidence that lowering MTU always fixes the issue. This fork does not change
 initial packet size or the global MTU default without reproduction evidence.
 
 For full `socks`, `USQUE_HTTP2=true` is an alternative when QUIC is blocked or
-unstable. This setting is rejected for `l4-socks`. Destination DNS is tunneled in
+unstable. This setting is rejected for `l4-socks`. To fail over automatically
+instead of choosing one transport, set `USQUE_TRANSPORTS` (for example
+`quic:443,http2:443,quic:4500`); each restart moves to the next entry. Destination DNS is tunneled in
 full socks by default; L4's upstream implementation resolves destination names
 locally. Never claim the L4 health check establishes DNS privacy through WARP.
 

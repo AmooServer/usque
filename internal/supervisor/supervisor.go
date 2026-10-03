@@ -65,8 +65,15 @@ func (r *Runner) Run(ctx context.Context, signals <-chan os.Signal) error {
 		p := Probe{Address: r.Config.SOCKSAddress(), URL: r.Config.HealthURL, Timeout: r.Config.HealthTimeout}
 		r.Probe = func(ctx context.Context) error { _, err := p.Check(ctx); return err }
 	}
+	transports := r.Config.Transports
+	if len(transports) == 0 {
+		transports = []Transport{{HTTP2: r.Config.HTTP2, Port: 443}}
+	}
+	transportIndex := 0
 	if r.command == nil {
-		r.command = func() *exec.Cmd { return exec.Command(r.Config.Binary, r.Config.ChildArgs()...) }
+		r.command = func() *exec.Cmd {
+			return exec.Command(r.Config.Binary, r.Config.ChildArgsFor(transports[transportIndex])...)
+		}
 	}
 	if r.random == nil {
 		r.random = rand.Float64
@@ -103,6 +110,7 @@ func (r *Runner) Run(ctx context.Context, signals <-chan os.Signal) error {
 			return nil
 		default:
 		}
+		state.Transport = transports[transportIndex].String()
 		cmd := r.command()
 		configureProcess(cmd)
 		cmd.Stdout, cmd.Stderr = r.Output, r.Output
@@ -115,7 +123,7 @@ func (r *Runner) Run(ctx context.Context, signals <-chan os.Signal) error {
 			state.ChildPID = cmd.Process.Pid
 			state.ChildStartedAt = time.Now().UTC()
 			publish()
-			r.Logger.Printf("child started pid=%d mode=%s socks=%s", cmd.Process.Pid, r.Config.Mode, r.Config.SOCKSAddress())
+			r.Logger.Printf("child started pid=%d mode=%s socks=%s transport=%s", cmd.Process.Pid, r.Config.Mode, r.Config.SOCKSAddress(), state.Transport)
 			wait := make(chan error, 1)
 			go func() { wait <- cmd.Wait() }()
 			reason, stop := r.monitor(ctx, signals, cmd, wait, &state, publish, &b)
@@ -128,11 +136,14 @@ func (r *Runner) Run(ctx context.Context, signals <-chan os.Signal) error {
 			state.LastRestartReason = fmt.Sprintf("child start failed: %v", err)
 		}
 		state.RestartCount++
+		// A failed transport is not retried first: the next child starts on the
+		// next configured transport, wrapping around to the first.
+		transportIndex = (transportIndex + 1) % len(transports)
 		state.Status = "backoff"
 		delay := b.delay()
 		state.Backoff = delay.String()
 		publish()
-		r.Logger.Printf("restarting child: %s; restart_count=%d delay=%s", state.LastRestartReason, state.RestartCount, delay)
+		r.Logger.Printf("restarting child: %s; restart_count=%d delay=%s next_transport=%s", state.LastRestartReason, state.RestartCount, delay, transports[transportIndex])
 		timer := time.NewTimer(delay)
 		select {
 		case <-ctx.Done():

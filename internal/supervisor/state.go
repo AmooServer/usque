@@ -18,6 +18,7 @@ type State struct {
 	Bind                string    `json:"bind"`
 	Port                int       `json:"port"`
 	Mode                string    `json:"mode"`
+	Transport           string    `json:"transport,omitempty"`
 	StartedAt           time.Time `json:"started_at"`
 	UpdatedAt           time.Time `json:"updated_at"`
 	ChildStartedAt      time.Time `json:"child_started_at"`

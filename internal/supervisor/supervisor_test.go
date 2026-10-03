@@ -272,3 +272,20 @@ func TestStartFailureIsRateLimited(t *testing.T) {
 		t.Fatalf("bad start failure state: %+v", state)
 	}
 }
+
+func TestRestartsRotateThroughTransports(t *testing.T) {
+	c := testConfig(t)
+	c.Transports = []Transport{{Port: 443}, {HTTP2: true, Port: 443}, {Port: 4500}}
+	run := runTestSupervisor(t, Runner{Config: c, command: func() *exec.Cmd { return helperCommand("exit") }, Probe: func(context.Context) error { return nil }})
+	var seen []string
+	for len(seen) < 4 {
+		state := awaitState(t, run, func(s State) bool { return s.Status == "starting" && s.ChildPID > 0 })
+		seen = append(seen, state.Transport)
+	}
+	want := []string{"quic:443", "http2:443", "quic:4500", "quic:443"}
+	for i := range want {
+		if seen[i] != want[i] {
+			t.Fatalf("transport order %v, want %v", seen, want)
+		}
+	}
+}
