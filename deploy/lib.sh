@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Shared implementation for the installed management tool. Sourcing this file
 # defines functions only; tests substitute paths and system services explicitly.
-REPO=GamerKhaan/usque
+REPO=AmooServer/usque
 ROOT=/opt/usque
 ETC=/etc/usque
 STATE=/var/lib/usque

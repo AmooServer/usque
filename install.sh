@@ -3,7 +3,7 @@
 set -euo pipefail
 umask 077
 
-REPO=GamerKhaan/usque
+REPO=AmooServer/usque
 fail() { printf 'usque installation failed: %s\n' "$*" >&2; exit 1; }
 [[ $EUID -eq 0 ]] || fail 'run with sudo bash'
 [[ $(uname -s) == Linux ]] || fail 'only Linux is supported'

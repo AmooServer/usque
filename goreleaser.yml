@@ -42,7 +42,7 @@ checksum:
   algorithm: sha256
 release:
   github:
-    owner: GamerKhaan
+    owner: AmooServer
     name: usque
   # Fork suffixes identify locally carried patches. Release publication is manual
   # after CI; published service releases are eligible for explicit usquectl update.
