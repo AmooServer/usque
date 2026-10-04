@@ -8,8 +8,8 @@ if [[ ${1:-} != --case ]]; then
   for script in "$repo/install.sh" "$repo/scripts/usquectl" "$repo/deploy/lib.sh"; do bash -n "$script"; done
   cases=(env_defaults env_injection env_unknown env_dns env_dns_legacy env_dns_injection
     env_auth_defaults env_auth_service env_panel_override env_panel_without_service env_panel_injection
-    env_auth_path env_panel_ownership env_panel_symlink env_panel_writable env_panel_unknown
-    panel_health_update switch_unsupported_auth
+    env_auth_path env_panel_ownership env_panel_symlink env_panel_writable env_panel_unknown env_panel_hardlink env_panel_oversize
+    panel_health_update switch_unsupported_auth switch_blank_auth switch_blank_panel switch_legacy_no_auth
     atomic_switch switch_rollback switch_success switch_restart_error switch_unsupported_dns switch_supported_dns
     switch_activate_error switch_previous_error switch_restore_error
     import_invalid import_rollback import_success import_restore_error register_preserves register_failure
@@ -246,7 +246,7 @@ MOCK
       assert_equal "$(wc -l < "$work/health.calls" | tr -d ' ')" 2
     fi
     ;;
-  env_panel_injection|env_auth_path|env_panel_ownership|env_panel_symlink|env_panel_writable|env_panel_unknown)
+  env_panel_injection|env_auth_path|env_panel_ownership|env_panel_symlink|env_panel_writable|env_panel_unknown|env_panel_hardlink|env_panel_oversize)
     stat() { panel_stat "$@"; }
     printf 'USQUE_PORT=1903\n' > "$ETC/panel.env"
     chmod 0600 "$ETC/panel.env"
@@ -268,6 +268,8 @@ MOCK
         ;;
       env_panel_writable) chmod 0660 "$ETC/panel.env" ;;
       env_panel_unknown) printf 'USQUE_BINARY=/tmp/untrusted\n' > "$ETC/panel.env" ;;
+      env_panel_hardlink) ln "$ETC/panel.env" "$work/panel.env" ;;
+      env_panel_oversize) printf '#%4096s\n' '' > "$ETC/panel.env" ;;
     esac
     assert_fails load_env
     [[ ! -e $work/EXECUTED ]]
@@ -279,6 +281,30 @@ MOCK
     assert_equal "$(cat "$ROOT/current/VERSION")" v1.0.0
     assert_equal "$(cat "$ROOT/previous/VERSION")" v0.9.0
     [[ ! -e $work/systemctl.calls ]]
+    ;;
+  switch_blank_auth|switch_blank_panel|switch_legacy_no_auth)
+    printf '# Older release without managed SOCKS settings\n' > "$ROOT/releases/v0.9.0/deploy/lib.sh"
+    case $2 in
+      switch_blank_auth) printf 'USQUE_SOCKS_AUTH_FILE=\n' > "$ETC/service.env" ;;
+      switch_blank_panel)
+        stat() { panel_stat "$@"; }
+        printf 'USQUE_BIND=127.0.0.1\nUSQUE_PORT=1903\nUSQUE_SOCKS_AUTH_FILE=\n' > "$ETC/panel.env"
+        chmod 0600 "$ETC/panel.env"
+        ;;
+    esac
+    load_env
+    assert_equal "$USQUE_SOCKS_AUTH_FILE" ''
+    if [[ $2 == switch_legacy_no_auth ]]; then
+      rollback_release
+      assert_equal "$(cat "$ROOT/current/VERSION")" v0.9.0
+      assert_equal "$(cat "$ROOT/previous/VERSION")" v1.0.0
+      grep -q '^restart usque.service$' "$work/systemctl.calls"
+    else
+      assert_fails rollback_release
+      assert_equal "$(cat "$ROOT/current/VERSION")" v1.0.0
+      assert_equal "$(cat "$ROOT/previous/VERSION")" v0.9.0
+      [[ ! -e $work/systemctl.calls ]]
+    fi
     ;;
   atomic_switch)
     atomic_link "$ROOT/releases/v2.0.0" "$ROOT/current"

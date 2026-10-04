@@ -284,13 +284,20 @@ backup_existing_link() {
   fi
 }
 switch_release() {
-  local next=$1 old=${2:-} previous_before='' reason='New release failed health validation.'
+  local next=$1 old=${2:-} previous_before='' reason='New release failed health validation.' managed_settings=false
   # Older management tools reject unknown service.env keys even when their
   # supervisor ignores them. Reject an incompatible switch before changing the
   # active release instead of leaving rollback management unusable.
-  if [[ -n ${USQUE_SOCKS_AUTH_FILE:-} ]] &&
+  # Blank auth settings still need a compatible parser, and panel overrides
+  # must never be ignored by the target release's management tool.
+  if [[ -n ${USQUE_SOCKS_AUTH_FILE:-} || -e $ETC/panel.env || -L $ETC/panel.env ]]; then
+    managed_settings=true
+  elif [[ -f $ETC/service.env ]] && grep -q '^USQUE_SOCKS_AUTH_FILE=' "$ETC/service.env"; then
+    managed_settings=true
+  fi
+  if $managed_settings &&
      ! grep -qw 'USQUE_SOCKS_AUTH_FILE' "$next/deploy/lib.sh"; then
-    say 'Target release does not support managed SOCKS authentication. Current release was not changed.' >&2
+    say 'Target release does not support managed SOCKS settings. Current release was not changed.' >&2
     return 1
   fi
   if [[ -f $ETC/service.env ]] && grep -q '^USQUE_DNS=' "$ETC/service.env" &&
