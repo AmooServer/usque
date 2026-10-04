@@ -3,11 +3,12 @@
 package clientstats
 
 import (
-	"golang.org/x/sys/unix"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"golang.org/x/sys/unix"
 )
 
 func TestLinuxPrivateFileBoundary(t *testing.T) {
@@ -18,39 +19,69 @@ func TestLinuxPrivateFileBoundary(t *testing.T) {
 			target := filepath.Join(directory, "protected")
 			switch kind {
 			case "symlink":
-				os.WriteFile(target, []byte("sentinel"), 0640)
-				os.Symlink(target, path)
+				if err := os.WriteFile(target, []byte("sentinel"), 0640); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(target, path); err != nil {
+					t.Fatal(err)
+				}
 			case "fifo":
-				unix.Mkfifo(path, 0640)
+				if err := unix.Mkfifo(path, 0640); err != nil {
+					t.Fatal(err)
+				}
 			case "writable_file":
-				os.WriteFile(path, []byte("sentinel"), 0640)
-				os.Chmod(path, 0660)
+				if err := os.WriteFile(path, []byte("sentinel"), 0640); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chmod(path, 0660); err != nil {
+					t.Fatal(err)
+				}
 			case "hardlink":
-				os.WriteFile(target, []byte("sentinel"), 0640)
-				os.Link(target, path)
+				if err := os.WriteFile(target, []byte("sentinel"), 0640); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Link(target, path); err != nil {
+					t.Fatal(err)
+				}
 			case "wrong_owner":
 				if os.Geteuid() != 0 {
 					t.Skip("requires isolated root fixture")
 				}
-				os.WriteFile(path, []byte("sentinel"), 0640)
-				os.Chown(path, 12345, 12345)
+				if err := os.WriteFile(path, []byte("sentinel"), 0640); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chown(path, 12345, 12345); err != nil {
+					t.Fatal(err)
+				}
 			case "writable_dir":
-				os.Chmod(directory, 0777)
+				if err := os.Chmod(directory, 0777); err != nil {
+					t.Fatal(err)
+				}
 			case "parent_symlink":
 				alias := filepath.Join(t.TempDir(), "alias")
-				os.Symlink(directory, alias)
+				if err := os.Symlink(directory, alias); err != nil {
+					t.Fatal(err)
+				}
 				path = filepath.Join(alias, "clients.json")
 			}
 			collector, err := New(path)
 			if err == nil {
-				collector.Close()
+				if closeErr := collector.Close(); closeErr != nil {
+					t.Fatal(closeErr)
+				}
 				t.Fatal("unsafe file boundary accepted")
 			}
 			if strings.Contains(err.Error(), directory) {
 				t.Fatal("failure disclosed input path")
 			}
-			if data, e := os.ReadFile(target); e == nil && string(data) != "sentinel" {
-				t.Fatal("protected target changed")
+			if kind == "symlink" || kind == "hardlink" {
+				data, err := os.ReadFile(target)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if string(data) != "sentinel" {
+					t.Fatal("protected target changed")
+				}
 			}
 		})
 	}
@@ -63,7 +94,9 @@ func TestLinuxCheckpointModeAndSingleWriter(t *testing.T) {
 		t.Fatal("checkpoint permissions invalid")
 	}
 	if other, err := New(path); err == nil {
-		other.Close()
+		if closeErr := other.Close(); closeErr != nil {
+			t.Fatal(closeErr)
+		}
 		t.Fatal("second writer accepted")
 	}
 	if err := c.Close(); err != nil {
@@ -73,5 +106,7 @@ func TestLinuxCheckpointModeAndSingleWriter(t *testing.T) {
 	if err != nil {
 		t.Fatal("writer lock not released")
 	}
-	again.Close()
+	if err := again.Close(); err != nil {
+		t.Fatal(err)
+	}
 }
