@@ -1,6 +1,6 @@
 # usque — supervised WARP for Ubuntu
 
-A production-oriented public fork of [Diniboy1123/usque](https://github.com/Diniboy1123/usque), maintained by **GamerKhaan.ir**. It runs local SOCKS5 through Cloudflare WARP MASQUE and recovers when the child exits or stops carrying traffic.
+A production-oriented public fork of [Diniboy1123/usque](https://github.com/Diniboy1123/usque), maintained by **AmooServer**. It runs local SOCKS5 through Cloudflare WARP MASQUE and recovers when the child exits or stops carrying traffic.
 
 **Default SOCKS5 endpoint: `127.0.0.1:903` (TCP and UDP).** No tmux, screen, Docker, or interactive shell is needed. Upstream generic CLI defaults remain unchanged.
 
@@ -18,7 +18,7 @@ systemd → usque-supervisor → usque → Cloudflare WARP MASQUE
 Ubuntu with systemd, amd64 or arm64:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/GamerKhaan/usque/main/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/AmooServer/usque/main/install.sh | sudo bash
 ```
 
 The installer downloads **this fork's release**, verifies SHA256 checksums, creates a dedicated `usque` user, stages registration when needed, enables systemd, and waits for HTTPS/WARP readiness. No Go toolchain is required. Reinstalling preserves configuration. Fresh personal WARP registration uses the upstream flow and accepts [Cloudflare's application terms](https://www.cloudflare.com/application/terms/); review them before installation.
@@ -133,7 +133,7 @@ Consult the current [Xray SOCKS schema](https://xtls.github.io/en/config/outboun
 
 ## Update and rollback
 
-`sudo usquectl update` selects the latest release from **GamerKhaan/usque**, verifies the archive, stages a root-owned version directory, atomically changes the active release, restarts, and checks HTTPS/WARP. Failure restores the previous version and returns nonzero. `sudo usquectl rollback` health-checks the previous version in the same way. Both preserve configuration. A first installation has no previous version to restore.
+`sudo usquectl update` selects the latest release from **AmooServer/usque**, verifies the archive, stages a root-owned version directory, atomically changes the active release, restarts, and checks HTTPS/WARP. Failure restores the previous version and returns nonzero. `sudo usquectl rollback` health-checks the previous version in the same way. Both preserve configuration. A first installation has no previous version to restore.
 
 No unattended updates are enabled. Upstream changes enter an integration branch and require review, tests and deployment validation before a fork release. Read [upstream synchronization](docs/UPSTREAM_SYNC.md).
 
@@ -153,4 +153,4 @@ Go version is declared in `go.mod`. [CI](.github/workflows/ci.yml) and [GoReleas
 
 Initial upstream base: **v4.2.1**, `6aa03fc97d12848dce34eedbd187fb1077b5d1ea`. Original Git history and module path are retained for synchronization.
 
-The original **MIT copyright notice and license** are preserved in [LICENSE.md](LICENSE.md). Upstream code and research are credited to [Diniboy1123 and contributors](https://github.com/Diniboy1123/usque). The [archived upstream README](docs/UPSTREAM_README.md) retains original acknowledgements and generic CLI documentation. GamerKhaan.ir maintains this fork's modifications; this does not imply authorship of upstream code. This project is independent of and not endorsed by Cloudflare.
+The original **MIT copyright notice and license** are preserved in [LICENSE.md](LICENSE.md). Upstream code and research are credited to [Diniboy1123 and contributors](https://github.com/Diniboy1123/usque). The [archived upstream README](docs/UPSTREAM_README.md) retains original acknowledgements and generic CLI documentation. AmooServer maintains this fork's modifications; this does not imply authorship of upstream code. This project is independent of and not endorsed by Cloudflare.

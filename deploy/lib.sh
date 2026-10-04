@@ -22,7 +22,7 @@ lock_operations() {
 load_env() {
   local file label line key value metadata owner mode links size
   export USQUE_CONFIG="$ETC/config.json" USQUE_BINARY="$ROOT/current/usque" USQUE_STATE=/run/usque/status.json
-  export USQUE_BIND=127.0.0.1 USQUE_PORT=903 USQUE_MODE=socks USQUE_DNS= USQUE_SOCKS_AUTH_FILE=
+  export USQUE_BIND=127.0.0.1 USQUE_PORT=903 USQUE_MODE=socks USQUE_DNS='' USQUE_SOCKS_AUTH_FILE=''
   # Match systemd's panel drop-in precedence without sourcing either file.
   for file in "$ETC/service.env" "$ETC/panel.env"; do
     [[ -e $file || -L $file ]] || continue
@@ -31,10 +31,13 @@ load_env() {
       [[ -f $file && ! -L $file ]] || { say 'Invalid panel.env file ownership or permissions.' >&2; return 1; }
       metadata=$(stat -c '%u:%a:%h:%s' -- "$file") || return 1
       IFS=: read -r owner mode links size <<< "$metadata"
-      [[ $owner == 0 && $mode =~ ^[0-7]{3,4}$ && $links == 1 && $size =~ ^[0-9]+$ ]] &&
-        (( (8#$mode & 8#022) == 0 && size <= 4096 )) || {
+      if [[ $owner == 0 && $mode =~ ^[0-7]{3,4}$ && $links == 1 && $size =~ ^[0-9]+$ ]]; then
+        if (( (8#$mode & 8#022) != 0 || size > 4096 )); then
           say 'Invalid panel.env file ownership or permissions.' >&2; return 1;
-        }
+        fi
+      else
+        say 'Invalid panel.env file ownership or permissions.' >&2; return 1
+      fi
     fi
     while IFS= read -r line || [[ -n $line ]]; do
       [[ $line =~ ^[[:space:]]*(#|$) ]] && continue
