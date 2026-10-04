@@ -72,6 +72,7 @@ sudo usquectl uninstall
 | `/etc/usque/service.env` | Service settings; no credentials | `root:usque`, `0640` |
 | `/etc/usque/panel.env` | Optional managed panel overrides; no credentials | root-owned, private |
 | `/etc/usque/socks-auth.json` | Optional native SOCKS username/password | `root:usque`, `0640` |
+| `/var/lib/usque-clients/clients.json` | Optional durable SOCKS client monitoring | `usque:usque-clients`, file `0640`; directory `2750` |
 | `/etc/usque/backups/` | Configuration backups | `root:root`, directory `0700` |
 | `/run/usque/status.json` | Runtime health/restart state | service-owned, private |
 | `/opt/usque/releases/` | Immutable release payloads | root-owned |
@@ -82,6 +83,7 @@ Use `sudoedit /etc/usque/service.env`, then `sudo usquectl restart`. Use simple 
 | --- | --- |
 | `USQUE_BIND`, `USQUE_PORT`, `USQUE_MODE` | `127.0.0.1`, `903`, `socks` |
 | `USQUE_SOCKS_AUTH_FILE` | unset; optional private SOCKS credential file |
+| `USQUE_CLIENT_STATS_FILE` | unset; optional `/var/lib/usque-clients/clients.json` |
 | `USQUE_HEALTH_INTERVAL`, `USQUE_HEALTH_TIMEOUT` | `5s`, `5s` in the shipped profile (`20s`, `8s` when unset) |
 | `USQUE_HEALTH_FAILURES` | `2` in the shipped profile (`3` when unset) |
 | `USQUE_DIAL_TIMEOUT`, `USQUE_SHUTDOWN_TIMEOUT` | `8s`, `8s` |
@@ -102,6 +104,14 @@ For native SOCKS authentication, set `USQUE_SOCKS_AUTH_FILE=/etc/usque/socks-aut
 There is no built-in default SOCKS username or password. The managed panel requires a privately supplied nonempty username and password for the first authenticated configuration; leaving the password blank on later edits preserves the existing secret. It writes `/etc/usque/socks-auth.json` and configures `USQUE_SOCKS_AUTH_FILE` in `/etc/usque/panel.env`. Management commands read this protected file after `service.env`, so health and update checks use the panel's current port and authentication file. The management tool accepts only `/etc/usque/socks-auth.json` or a blank authentication path. The native default remains an unauthenticated loopback service until this setting is configured. Authenticated health checks require username/password negotiation and reject an anonymous fallback. Rollback to a release without support for the configured managed settings is refused before activation, including blank auth settings and panel overrides.
 
 SOCKS UDP replies preserve the authenticated TCP association's local IPv4 address. This keeps replies to separate public/private listeners on their original address without changing the WARP transport's source selection.
+
+Optional client monitoring is shared by `socks` and `l4-socks`. Provision `/var/lib/usque-clients` as `usque:usque-clients`, mode `2750`, before setting `USQUE_CLIENT_STATS_FILE=/var/lib/usque-clients/clients.json` in `service.env`. The native commands accept `--client-stats-file`; the supervisor passes only its path. The panel needs the dedicated `usque-clients` read group rather than the group that can read credentials. Monitoring does not change listeners, authentication, or WARP routing. Rollback to a management tool without support for an explicitly configured monitoring setting is refused before activation, including a blank setting.
+
+The optional Gcore panel integration provisions this directory and separate systemd drop-ins: the native writer gets access to the statistics path, and the panel gets only the `usque-clients` read group. The base native unit does not require that optional group or directory. Panel access to statistics never requires membership in the credential group `usque`.
+
+The schema version 1 JSON snapshot groups authenticated SOCKS sessions by their canonical remote IP, so clients behind one NAT address share a row. Configure SOCKS authentication to record clients; anonymous sessions and loopback diagnostic traffic are excluded. It reports active TCP CONNECT and UDP ASSOCIATE control sessions separately, cumulative upload/download payload bytes successfully written, connection counts, and Unix-second timestamps. UDP destinations do not create extra client sessions. Up to 4096 IP records are retained without eviction; omitted clients contribute to the explicit overflow aggregate and `capacity_reached` flag. This counts SOCKS clients rather than web-panel visitors, and stores no usernames, passwords, destination addresses, or packet contents.
+
+Snapshots are written atomically every two seconds and retain cumulative history across native child restarts. A normal monitored shutdown freezes updates and publishes a final snapshot with zero active sessions; writes completing after that boundary are excluded. An abrupt exit can lose traffic since the previous checkpoint. Use the sample timestamp to assess freshness: these are monitoring counters, not billing measurements.
 
 ## Xray, sing-box and Hysteria
 

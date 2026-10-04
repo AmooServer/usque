@@ -22,7 +22,7 @@ lock_operations() {
 load_env() {
   local file label line key value metadata owner mode links size
   export USQUE_CONFIG="$ETC/config.json" USQUE_BINARY="$ROOT/current/usque" USQUE_STATE=/run/usque/status.json
-  export USQUE_BIND=127.0.0.1 USQUE_PORT=903 USQUE_MODE=socks USQUE_DNS='' USQUE_SOCKS_AUTH_FILE=''
+  export USQUE_BIND=127.0.0.1 USQUE_PORT=903 USQUE_MODE=socks USQUE_DNS='' USQUE_SOCKS_AUTH_FILE='' USQUE_CLIENT_STATS_FILE=''
   # Match systemd's panel drop-in precedence without sourcing either file.
   for file in "$ETC/service.env" "$ETC/panel.env"; do
     [[ -e $file || -L $file ]] || continue
@@ -50,11 +50,14 @@ load_env() {
         esac
       fi
       case "$key" in
-        USQUE_CONFIG|USQUE_BINARY|USQUE_STATE|USQUE_BIND|USQUE_PORT|USQUE_MODE|USQUE_DNS|USQUE_ALLOW_PUBLIC|USQUE_HEALTH_URL|USQUE_HEALTH_INTERVAL|USQUE_HEALTH_TIMEOUT|USQUE_HEALTH_FAILURES|USQUE_DIAL_TIMEOUT|USQUE_SHUTDOWN_TIMEOUT|USQUE_BACKOFF_MIN|USQUE_BACKOFF_MAX|USQUE_HEALTHY_RESET|USQUE_ALWAYS_RECONNECT|USQUE_MTU|USQUE_HTTP2|USQUE_TRANSPORTS|USQUE_SOCKS_AUTH_FILE) ;;
+        USQUE_CONFIG|USQUE_BINARY|USQUE_STATE|USQUE_BIND|USQUE_PORT|USQUE_MODE|USQUE_DNS|USQUE_ALLOW_PUBLIC|USQUE_HEALTH_URL|USQUE_HEALTH_INTERVAL|USQUE_HEALTH_TIMEOUT|USQUE_HEALTH_FAILURES|USQUE_DIAL_TIMEOUT|USQUE_SHUTDOWN_TIMEOUT|USQUE_BACKOFF_MIN|USQUE_BACKOFF_MAX|USQUE_HEALTHY_RESET|USQUE_ALWAYS_RECONNECT|USQUE_MTU|USQUE_HTTP2|USQUE_TRANSPORTS|USQUE_SOCKS_AUTH_FILE|USQUE_CLIENT_STATS_FILE) ;;
         *) say "Unsupported $label key: $key" >&2; return 1 ;;
       esac
       # Only the path is configuration; credentials remain in the private JSON.
       if [[ $key == USQUE_SOCKS_AUTH_FILE && -n $value && $value != /etc/usque/socks-auth.json ]]; then
+        say "Invalid $label value for $key" >&2; return 1
+      fi
+      if [[ $key == USQUE_CLIENT_STATS_FILE && -n $value && $value != /var/lib/usque-clients/clients.json ]]; then
         say "Invalid $label value for $key" >&2; return 1
       fi
       # systemd EnvironmentFile and the management tool deliberately share this
@@ -287,7 +290,7 @@ backup_existing_link() {
   fi
 }
 switch_release() {
-  local next=$1 old=${2:-} previous_before='' reason='New release failed health validation.' managed_settings=false
+  local next=$1 old=${2:-} previous_before='' reason='New release failed health validation.' managed_settings=false stats_settings=false
   # Older management tools reject unknown service.env keys even when their
   # supervisor ignores them. Reject an incompatible switch before changing the
   # active release instead of leaving rollback management unusable.
@@ -301,6 +304,15 @@ switch_release() {
   if $managed_settings &&
      ! grep -qw 'USQUE_SOCKS_AUTH_FILE' "$next/deploy/lib.sh"; then
     say 'Target release does not support managed SOCKS settings. Current release was not changed.' >&2
+    return 1
+  fi
+  if [[ -n ${USQUE_CLIENT_STATS_FILE:-} ]]; then
+    stats_settings=true
+  elif [[ -f $ETC/service.env ]] && grep -q '^USQUE_CLIENT_STATS_FILE=' "$ETC/service.env"; then
+    stats_settings=true
+  fi
+  if $stats_settings && ! grep -qw 'USQUE_CLIENT_STATS_FILE' "$next/deploy/lib.sh"; then
+    say 'Target release does not support client monitoring settings. Current release was not changed.' >&2
     return 1
   fi
   if [[ -f $ETC/service.env ]] && grep -q '^USQUE_DNS=' "$ETC/service.env" &&

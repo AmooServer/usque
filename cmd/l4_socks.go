@@ -29,6 +29,13 @@ var l4SocksCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
+		collector, err := clientStatsFromCommand(cmd)
+		if err != nil {
+			return err
+		}
+		if collector != nil {
+			defer func() { _ = collector.Close() }()
+		}
 
 		addr := net.JoinHostPort(opts.bind, opts.port)
 		server, err := internal.NewSOCKS5Server(internal.SOCKS5Config{
@@ -41,13 +48,14 @@ var l4SocksCmd = &cobra.Command{
 			TCPOnly:     true,
 			DialTimeout: dialTimeout,
 			Logger:      log.Default(),
+			ClientStats: collector,
 		})
 		if err != nil {
 			return fmt.Errorf("failed to create SOCKS proxy: %w", err)
 		}
 
-		if err := server.Start(); err != nil {
-			return fmt.Errorf("failed to start SOCKS proxy: %w", err)
+		if err := runSOCKSServer(server, collector); err != nil {
+			return fmt.Errorf("SOCKS proxy failed: %w", err)
 		}
 		return nil
 	},
@@ -56,6 +64,7 @@ var l4SocksCmd = &cobra.Command{
 func init() {
 	addL4ProxyFlags(l4SocksCmd, "1080", "SOCKS")
 	l4SocksCmd.Flags().String("socks-auth-file", "", "Private root:usque 0640 JSON file with SOCKS username and password (Linux)")
+	l4SocksCmd.Flags().String("client-stats-file", "", "Optional private JSON file for durable SOCKS client traffic monitoring")
 	l4SocksCmd.Flags().Duration("dial-timeout", 15*time.Second, "Maximum time for SOCKS DNS resolution and connection establishment")
 	rootCmd.AddCommand(l4SocksCmd)
 }

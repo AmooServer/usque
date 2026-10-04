@@ -7,7 +7,8 @@ repo=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 if [[ ${1:-} != --case ]]; then
   for script in "$repo/install.sh" "$repo/scripts/usquectl" "$repo/deploy/lib.sh"; do bash -n "$script"; done
   cases=(env_defaults env_injection env_unknown env_dns env_dns_legacy env_dns_injection
-    env_auth_defaults env_auth_service env_panel_override env_panel_without_service env_panel_injection
+    env_auth_defaults env_auth_service env_stats_defaults env_stats_service env_stats_path
+    switch_unsupported_stats switch_blank_stats env_panel_override env_panel_without_service env_panel_injection
     env_auth_path env_panel_ownership env_panel_symlink env_panel_writable env_panel_unknown env_panel_hardlink env_panel_oversize
     panel_health_update switch_unsupported_auth switch_blank_auth switch_blank_panel switch_legacy_no_auth
     atomic_switch switch_rollback switch_success switch_restart_error switch_unsupported_dns switch_supported_dns
@@ -202,6 +203,34 @@ case $2 in
     printf 'USQUE_SOCKS_AUTH_FILE=/etc/usque/socks-auth.json\n' > "$ETC/service.env"
     load_env
     assert_equal "$USQUE_SOCKS_AUTH_FILE" /etc/usque/socks-auth.json
+    ;;
+  env_stats_defaults)
+    export USQUE_CLIENT_STATS_FILE=/tmp/inherited.json
+    load_env
+    assert_equal "$USQUE_CLIENT_STATS_FILE" ''
+    ;;
+  env_stats_service)
+    printf 'USQUE_CLIENT_STATS_FILE=/var/lib/usque-clients/clients.json\n' > "$ETC/service.env"
+    load_env
+    assert_equal "$USQUE_CLIENT_STATS_FILE" /var/lib/usque-clients/clients.json
+    ;;
+  env_stats_path)
+    printf 'USQUE_CLIENT_STATS_FILE=/tmp/unsupported.json\n' > "$ETC/service.env"
+    assert_fails load_env
+    ;;
+  switch_unsupported_stats|switch_blank_stats)
+    # The old auth-aware management loader still rejects the new stats key.
+    printf 'USQUE_SOCKS_AUTH_FILE=\n' > "$ROOT/releases/v0.9.0/deploy/lib.sh"
+    if [[ $2 == switch_blank_stats ]]; then
+      printf 'USQUE_CLIENT_STATS_FILE=\n' > "$ETC/service.env"
+      export USQUE_CLIENT_STATS_FILE=''
+    else
+      export USQUE_CLIENT_STATS_FILE=/var/lib/usque-clients/clients.json
+    fi
+    assert_fails rollback_release
+    assert_equal "$(cat "$ROOT/current/VERSION")" v1.0.0
+    assert_equal "$(cat "$ROOT/previous/VERSION")" v0.9.0
+    [[ ! -e $work/systemctl.calls ]]
     ;;
   env_panel_override|env_panel_without_service|panel_health_update)
     stat() { panel_stat "$@"; }

@@ -222,6 +222,13 @@ var socksCmd = &cobra.Command{
 			return fmt.Errorf("failed to create virtual TUN device: %w", err)
 		}
 		defer func() { _ = tunDev.Close() }()
+		collector, err := clientStatsFromCommand(cmd)
+		if err != nil {
+			return err
+		}
+		if collector != nil {
+			defer func() { _ = collector.Close() }()
+		}
 
 		tunnelCtx, cancelTunnel := context.WithCancel(cmd.Context())
 		defer cancelTunnel()
@@ -259,13 +266,14 @@ var socksCmd = &cobra.Command{
 			UDPTimeout:  udpTimeout,
 			DialTimeout: dialTimeout,
 			Logger:      log.New(internal.NewTZStampWriter(os.Stderr), "socks5: ", 0),
+			ClientStats: collector,
 		})
 		if err != nil {
 			return fmt.Errorf("failed to create SOCKS proxy: %w", err)
 		}
 
-		if err := server.Start(); err != nil {
-			return fmt.Errorf("failed to start SOCKS proxy: %w", err)
+		if err := runSOCKSServer(server, collector); err != nil {
+			return fmt.Errorf("SOCKS proxy failed: %w", err)
 		}
 		return nil
 	},
@@ -277,6 +285,7 @@ func init() {
 	socksCmd.Flags().StringP("username", "u", "", "Username for proxy authentication (specify both username and password to enable)")
 	socksCmd.Flags().StringP("password", "w", "", "Password for proxy authentication (specify both username and password to enable)")
 	socksCmd.Flags().String("socks-auth-file", "", "Private root:usque 0640 JSON file with SOCKS username and password (Linux)")
+	socksCmd.Flags().String("client-stats-file", "", "Optional private JSON file for durable SOCKS client traffic monitoring")
 	socksCmd.Flags().IntP("connect-port", "P", 443, "Used port for MASQUE connection")
 	socksCmd.Flags().StringArrayP("dns", "d", []string{"9.9.9.9", "149.112.112.112", "2620:fe::fe", "2620:fe::9"}, "DNS servers for the tunnel stack; with -l also used for SOCKS name lookups (unless --system-dns)")
 	socksCmd.Flags().DurationP("dns-timeout", "t", 2*time.Second, "Timeout for DNS queries")

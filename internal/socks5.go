@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Diniboy1123/usque/internal/clientstats"
 	"github.com/txthinking/runnergroup"
 	"github.com/txthinking/socks5"
 	"golang.org/x/net/ipv4"
@@ -32,6 +33,7 @@ type SOCKS5Config struct {
 	TCPTimeout  time.Duration // 0 = no deadline on TCP CONNECT relay
 	UDPTimeout  time.Duration // 0 = no deadline on remote UDP reads
 	Logger      *log.Logger
+	ClientStats *clientstats.Collector // Optional authenticated client payload monitoring.
 }
 
 // SOCKS5Server wraps the SOCKS5 protocol parser with server-local dialers and associations.
@@ -159,27 +161,7 @@ func (s *SOCKS5Server) listenAndServe() error {
 				if err != nil {
 					return err
 				}
-				go func(c *net.TCPConn) {
-					defer func() { _ = c.Close() }()
-					if err := c.SetDeadline(time.Now().Add(s.cfg.DialTimeout)); err != nil {
-						return
-					}
-					if err := srv.Negotiate(c); err != nil {
-						logSOCKSError("negotiation", c.RemoteAddr(), err)
-						return
-					}
-					r, err := srv.GetRequest(c)
-					if err != nil {
-						logSOCKSError("request parsing", c.RemoteAddr(), err)
-						return
-					}
-					if err := c.SetDeadline(time.Time{}); err != nil {
-						return
-					}
-					if err := srv.Handle.TCPHandle(srv, c, r); err != nil {
-						log.Printf("SOCKS TCP handle from %s failed: %v", c.RemoteAddr(), err)
-					}
-				}(c)
+				go s.serveTCP(c)
 			}
 		},
 		Stop: func() error {
@@ -239,6 +221,48 @@ func (s *SOCKS5Server) listenAndServe() error {
 		},
 	})
 	return srv.RunnerGroup.Wait()
+}
+
+func (s *SOCKS5Server) serveTCP(c *net.TCPConn) {
+	defer func() { _ = c.Close() }()
+	if err := c.SetDeadline(time.Now().Add(s.cfg.DialTimeout)); err != nil {
+		return
+	}
+	if err := s.server.Negotiate(c); err != nil {
+		logSOCKSError("negotiation", c.RemoteAddr(), err)
+		return
+	}
+	r, err := s.server.GetRequest(c)
+	if err != nil {
+		logSOCKSError("request parsing", c.RemoteAddr(), err)
+		return
+	}
+	if err := c.SetDeadline(time.Time{}); err != nil {
+		return
+	}
+	if err := s.TCPHandle(s.server, c, r); err != nil {
+		log.Printf("SOCKS TCP handle from %s failed: %v", c.RemoteAddr(), err)
+	}
+}
+
+func (s *SOCKS5Server) beginClientSession(peer net.Addr, command byte) *clientstats.Session {
+	// Negotiate must have succeeded before this is called by the TCP handler.
+	// Anonymous library callers and loopback diagnostics remain unrecorded.
+	if s.cfg.Username == "" || s.cfg.Password == "" || peer == nil {
+		return nil
+	}
+	host, _, err := net.SplitHostPort(peer.String())
+	if err != nil {
+		return nil
+	}
+	switch command {
+	case socks5.CmdConnect:
+		return s.cfg.ClientStats.Begin(host, "tcp")
+	case socks5.CmdUDP:
+		return s.cfg.ClientStats.Begin(host, "udp")
+	default:
+		return nil
+	}
 }
 
 func logSOCKSError(stage string, addr net.Addr, err error) {
@@ -354,7 +378,9 @@ func (s *SOCKS5Server) TCPHandle(srv *socks5.Server, c *net.TCPConn, r *socks5.R
 			return err
 		}
 		defer func() { _ = rc.Close() }()
-		s.relayTCP(c, rc, time.Duration(srv.TCPTimeout)*time.Second)
+		session := s.beginClientSession(c.RemoteAddr(), socks5.CmdConnect)
+		defer session.End()
+		s.relayTCP(c, rc, time.Duration(srv.TCPTimeout)*time.Second, session)
 		return nil
 
 	case socks5.CmdUDP:
@@ -427,7 +453,11 @@ type closeWriter interface {
 	CloseWrite() error
 }
 
-func (s *SOCKS5Server) relayTCP(a, b net.Conn, timeout time.Duration) {
+func (s *SOCKS5Server) relayTCP(a, b net.Conn, timeout time.Duration, sessions ...*clientstats.Session) {
+	var session *clientstats.Session
+	if len(sessions) > 0 {
+		session = sessions[0]
+	}
 	var wg sync.WaitGroup
 	var closeOnce sync.Once
 	abort := func() {
@@ -437,7 +467,7 @@ func (s *SOCKS5Server) relayTCP(a, b net.Conn, timeout time.Duration) {
 		})
 	}
 	wg.Add(2)
-	relay := func(dst, src net.Conn) {
+	relay := func(dst, src net.Conn, upload bool) {
 		defer wg.Done()
 		bp := tcpRelayBufPool.Get().(*[]byte)
 		buf := *bp
@@ -451,7 +481,13 @@ func (s *SOCKS5Server) relayTCP(a, b net.Conn, timeout time.Duration) {
 			}
 			n, err := src.Read(buf)
 			if n > 0 {
-				if _, writeErr := dst.Write(buf[:n]); writeErr != nil {
+				written, writeErr := dst.Write(buf[:n])
+				if upload {
+					session.Upload(written)
+				} else {
+					session.Download(written)
+				}
+				if writeErr != nil || written != n {
 					abort()
 					return
 				}
@@ -470,8 +506,8 @@ func (s *SOCKS5Server) relayTCP(a, b net.Conn, timeout time.Duration) {
 			}
 		}
 	}
-	go relay(a, b)
-	go relay(b, a)
+	go relay(a, b, false)
+	go relay(b, a, true)
 	wg.Wait()
 }
 
@@ -496,7 +532,13 @@ func (s *SOCKS5Server) UDPHandle(srv *socks5.Server, addr *net.UDPAddr, d *socks
 			if err := ue.RemoteConn.SetWriteDeadline(time.Now().Add(s.cfg.DialTimeout)); err != nil {
 				return err
 			}
-			_, err := ue.RemoteConn.Write(data)
+			written, err := ue.RemoteConn.Write(data)
+			if assoc != nil {
+				assoc.session.Upload(written)
+			}
+			if err == nil && written != len(data) {
+				return io.ErrShortWrite
+			}
 			return err
 		}
 	}
@@ -595,14 +637,18 @@ func (s *SOCKS5Server) UDPHandle(srv *socks5.Server, addr *net.UDPAddr, d *socks
 				w = append(w, dg.DstAddr...)
 				w = append(w, dg.DstPort...)
 				w = append(w, dg.Data...)
+				var written int
 				if assoc != nil && assoc.localIP.To4() != nil && ue.ClientAddr.IP.To4() != nil {
-					_, err = ipv4.NewPacketConn(srv.UDPConn).WriteTo(w, &ipv4.ControlMessage{Src: assoc.localIP}, ue.ClientAddr)
+					written, err = ipv4.NewPacketConn(srv.UDPConn).WriteTo(w, &ipv4.ControlMessage{Src: assoc.localIP}, ue.ClientAddr)
 				} else {
-					_, err = srv.UDPConn.WriteToUDP(w, ue.ClientAddr)
+					written, err = srv.UDPConn.WriteToUDP(w, ue.ClientAddr)
+				}
+				if err == nil && written == len(w) && assoc != nil {
+					assoc.session.Download(n)
 				}
 				*wp = w
 				udpWireBufPool.Put(wp)
-				if err != nil {
+				if err != nil || written != len(w) {
 					return
 				}
 			}

@@ -38,6 +38,7 @@ func execute(args []string) error {
 		fmt.Println("Usage: usque-supervisor [run|health|status|validate-config [path]|version]")
 		fmt.Println("Service settings come from USQUE_* environment variables; see /etc/usque/service.env.")
 		fmt.Println("USQUE_SOCKS_AUTH_FILE selects a private root:usque 0640 JSON file for SOCKS credentials.")
+		fmt.Println("USQUE_CLIENT_STATS_FILE selects /var/lib/usque-clients/clients.json for optional client monitoring.")
 		return nil
 	}
 	if command == "validate-config" {

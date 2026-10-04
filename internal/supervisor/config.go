@@ -17,6 +17,7 @@ import (
 type Config struct {
 	Binary, ConfigPath, StatePath, Bind, Mode, HealthURL string
 	SOCKSAuthFile                                        string
+	ClientStatsFile                                      string
 	DNS                                                  []string
 	Port, HealthFailures, MTU                            int
 	HTTP2, AlwaysReconnect, AllowPublic                  bool
@@ -67,7 +68,8 @@ func FromEnvironment(getenv func(string) string) (Config, error) {
 	for key, dst := range map[string]*string{
 		"USQUE_BINARY": &c.Binary, "USQUE_CONFIG": &c.ConfigPath, "USQUE_STATE": &c.StatePath,
 		"USQUE_BIND": &c.Bind, "USQUE_MODE": &c.Mode, "USQUE_HEALTH_URL": &c.HealthURL,
-		"USQUE_SOCKS_AUTH_FILE": &c.SOCKSAuthFile,
+		"USQUE_SOCKS_AUTH_FILE":   &c.SOCKSAuthFile,
+		"USQUE_CLIENT_STATS_FILE": &c.ClientStatsFile,
 	} {
 		if value := getenv(key); value != "" {
 			*dst = value
@@ -120,6 +122,9 @@ func FromEnvironment(getenv func(string) string) (Config, error) {
 }
 
 func (c Config) Validate() error {
+	if c.ClientStatsFile != "" && c.ClientStatsFile != "/var/lib/usque-clients/clients.json" {
+		return fmt.Errorf("USQUE_CLIENT_STATS_FILE must be /var/lib/usque-clients/clients.json or empty")
+	}
 	if c.SOCKSAuthFile != "" {
 		if _, err := socksauth.Load(c.SOCKSAuthFile); err != nil {
 			return err
@@ -212,6 +217,9 @@ func (c Config) ChildArgsFor(t Transport) []string {
 	args := []string{"-c", c.ConfigPath, c.Mode, "-b", c.Bind, "-p", strconv.Itoa(c.Port), "--dial-timeout", c.DialTimeout.String()}
 	if c.SOCKSAuthFile != "" {
 		args = append(args, "--socks-auth-file", c.SOCKSAuthFile)
+	}
+	if c.ClientStatsFile != "" {
+		args = append(args, "--client-stats-file", c.ClientStatsFile)
 	}
 	if c.Mode == "socks" {
 		args = append(args, "--mtu", strconv.Itoa(c.MTU), "--always-reconnect="+strconv.FormatBool(c.AlwaysReconnect), "--http2="+strconv.FormatBool(t.HTTP2))

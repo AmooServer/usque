@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 
+	"github.com/Diniboy1123/usque/internal/clientstats"
 	"github.com/txthinking/socks5"
 )
 
@@ -19,6 +20,7 @@ type udpAssociation struct {
 	localIP net.IP
 	ctx     context.Context
 	cancel  context.CancelFunc
+	session *clientstats.Session // Immutable authenticated TCP peer accounting reference.
 }
 
 func isZeroUDPAssociateRequest(r *socks5.Request) bool {
@@ -34,6 +36,14 @@ func isZeroUDPAssociateRequest(r *socks5.Request) bool {
 }
 
 func (s *SOCKS5Server) registerUDPAssociation(r *socks5.Request, peer net.Addr, local ...net.Addr) (*udpAssociation, error) {
+	var localAddr net.Addr
+	if len(local) > 0 {
+		localAddr = local[0]
+	}
+	return s.registerUDPAssociationWithSession(r, peer, localAddr, nil)
+}
+
+func (s *SOCKS5Server) registerUDPAssociationWithSession(r *socks5.Request, peer, local net.Addr, session *clientstats.Session) (*udpAssociation, error) {
 	peerHost, peerPort, err := net.SplitHostPort(peer.String())
 	if err != nil {
 		return nil, err
@@ -84,9 +94,12 @@ func (s *SOCKS5Server) registerUDPAssociation(r *socks5.Request, peer net.Addr, 
 		return nil, fmt.Errorf("UDP source already has a live TCP association")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	a := &udpAssociation{source: source, peerIP: peerIP.String(), ctx: ctx, cancel: cancel}
-	if len(local) > 0 {
-		if addr, ok := local[0].(*net.TCPAddr); ok && !addr.IP.IsUnspecified() {
+	if session == nil {
+		session = s.beginClientSession(peer, socks5.CmdUDP)
+	}
+	a := &udpAssociation{source: source, peerIP: peerIP.String(), ctx: ctx, cancel: cancel, session: session}
+	if local != nil {
+		if addr, ok := local.(*net.TCPAddr); ok && !addr.IP.IsUnspecified() {
 			a.localIP = append(net.IP(nil), addr.IP...)
 		}
 	}
@@ -122,6 +135,7 @@ func (s *SOCKS5Server) claimUDPAssociation(addr *net.UDPAddr) (*udpAssociation, 
 }
 
 func (s *SOCKS5Server) closeUDPAssociation(a *udpAssociation) {
+	defer a.session.End()
 	s.udpAssociationMu.Lock()
 	defer s.udpAssociationMu.Unlock()
 	a.cancel()
