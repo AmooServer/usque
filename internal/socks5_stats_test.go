@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"path/filepath"
+	"syscall"
 	"testing"
 	"time"
 
@@ -56,7 +57,7 @@ func TestTCPStatsCountPartialWritesAndDirection(t *testing.T) {
 	done := make(chan struct{})
 	defer func() { _ = a.Close(); _ = b.Close(); _ = client.Close(); _ = remote.Close(); <-done }()
 	go func() { s.relayTCP(a, partialStatsConn{b}, 0, session); close(done) }()
-	_, _ = client.Write([]byte("long upload"))
+	writeStatsFixture(t, client, []byte("long upload"))
 	select {
 	case <-done:
 	case <-time.After(time.Second):
@@ -94,16 +95,26 @@ func TestUDPStatsCreditAuthenticatedControlAndExcludeHeader(t *testing.T) {
 	local, upstream := net.Pipe()
 	s.cfg.DialUDP = func(_ context.Context, _, _ string) (net.Conn, error) { return local, nil }
 	defer func() { _ = local.Close(); _ = upstream.Close() }()
+	upstreamResult := make(chan error, 1)
 	go func() {
 		data := make([]byte, 4)
-		_, _ = io.ReadFull(upstream, data)
-		_, _ = upstream.Write([]byte("reply"))
+		if _, err := io.ReadFull(upstream, data); err != nil {
+			upstreamResult <- err
+			return
+		}
+		n, err := upstream.Write([]byte("reply"))
+		if err == nil && n != len("reply") {
+			err = io.ErrShortWrite
+		}
+		upstreamResult <- err
 	}()
 	d := socks5.NewDatagram(socks5.ATYPIPv4, net.ParseIP("192.0.2.80").To4(), []byte{0, 53}, []byte("ping"))
 	if err := s.UDPHandle(s.server, client.LocalAddr().(*net.UDPAddr), d); err != nil {
 		t.Fatal(err)
 	}
-	_ = client.SetReadDeadline(time.Now().Add(time.Second))
+	if err := client.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
 	wire := make([]byte, 128)
 	n, _, err := client.ReadFromUDP(wire)
 	if err != nil {
@@ -112,6 +123,9 @@ func TestUDPStatsCreditAuthenticatedControlAndExcludeHeader(t *testing.T) {
 	frame, err := socks5.NewDatagramFromBytes(wire[:n])
 	if err != nil || string(frame.Data) != "reply" {
 		t.Fatal("bad framed reply")
+	}
+	if err := <-upstreamResult; err != nil {
+		t.Fatal(err)
 	}
 	deadline := time.Now().Add(time.Second)
 	for stats.Snapshot().Clients[0].DownloadBytes != 5 && time.Now().Before(deadline) {
@@ -151,19 +165,32 @@ func nonLoopbackTCPPair(t *testing.T) (*net.TCPConn, *net.TCPConn) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer listener.Close()
+	defer func() { _ = listener.Close() }()
 	client, err := net.DialTCP("tcp4", &net.TCPAddr{IP: ip}, listener.Addr().(*net.TCPAddr))
 	if err != nil {
 		t.Fatal(err)
 	}
 	server, err := listener.AcceptTCP()
 	if err != nil {
-		client.Close()
+		_ = client.Close()
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { client.Close(); server.Close() })
-	client.SetDeadline(time.Now().Add(2 * time.Second))
+	t.Cleanup(func() { _ = client.Close(); _ = server.Close() })
+	if err := client.SetDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
 	return server, client
+}
+
+func writeStatsFixture(t *testing.T, c net.Conn, payload []byte) {
+	t.Helper()
+	n, err := c.Write(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != len(payload) {
+		t.Fatal(io.ErrShortWrite)
+	}
 }
 
 func authenticateStatsClient(t *testing.T, c net.Conn, password string) bool {
@@ -197,7 +224,7 @@ func TestRealAuthenticationAndAcceptedTCPAccounting(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer upstream.Close()
+	defer func() { _ = upstream.Close() }()
 	s, err := NewSOCKS5Server(SOCKS5Config{Addr: "127.0.0.1:0", Username: "fixture-user", Password: "fixture-password", TCPOnly: true, ClientStats: stats, DialTCP: func(ctx context.Context, _, _ string) (net.Conn, error) {
 		return (&net.Dialer{}).DialContext(ctx, "tcp4", upstream.Addr().String())
 	}})
@@ -222,27 +249,52 @@ func TestRealAuthenticationAndAcceptedTCPAccounting(t *testing.T) {
 		if !accepted {
 			t.Fatal("correct auth rejected")
 		}
+		upstreamResult := make(chan error, 1)
 		go func() {
 			remote, e := upstream.AcceptTCP()
 			if e != nil {
+				upstreamResult <- e
 				return
 			}
-			defer remote.Close()
+			defer func() { _ = remote.Close() }()
+			if err := remote.SetDeadline(time.Now().Add(2 * time.Second)); err != nil {
+				upstreamResult <- err
+				return
+			}
 			payload := make([]byte, 7)
-			io.ReadFull(remote, payload)
-			remote.Write([]byte("downdata"))
+			if _, err := io.ReadFull(remote, payload); err != nil {
+				upstreamResult <- err
+				return
+			}
+			if string(payload) != "payload" {
+				upstreamResult <- errors.New("fixture upload did not match")
+				return
+			}
+			n, err := remote.Write([]byte("downdata"))
+			if err == nil && n != len("downdata") {
+				err = io.ErrShortWrite
+			}
+			upstreamResult <- err
 		}()
-		client.Write([]byte{5, 1, 0, 1, 192, 0, 2, 100, 0, 80})
+		writeStatsFixture(t, client, []byte{5, 1, 0, 1, 192, 0, 2, 100, 0, 80})
 		reply := make([]byte, 10)
 		if _, err := io.ReadFull(client, reply); err != nil || reply[1] != 0 {
 			t.Fatal("CONNECT rejected")
 		}
-		client.Write([]byte("payload"))
+		writeStatsFixture(t, client, []byte("payload"))
 		download := make([]byte, 8)
 		if _, err := io.ReadFull(client, download); err != nil {
 			t.Fatal(err)
 		}
-		client.Close()
+		if string(download) != "downdata" {
+			t.Fatal("fixture download did not match")
+		}
+		if err := <-upstreamResult; err != nil {
+			t.Fatal(err)
+		}
+		if err := client.Close(); err != nil {
+			t.Fatal(err)
+		}
 		select {
 		case <-done:
 		case <-time.After(time.Second):
@@ -267,7 +319,7 @@ func TestRealAuthenticatedUDPControlCountsOneSessionAndNoControlBytes(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer listener.Close()
+	defer func() { _ = listener.Close() }()
 	s.server.UDPConn = listener
 	server, client := nonLoopbackTCPPair(t)
 	done := make(chan struct{})
@@ -275,7 +327,7 @@ func TestRealAuthenticatedUDPControlCountsOneSessionAndNoControlBytes(t *testing
 	if !authenticateStatsClient(t, client, "fixture-password") {
 		t.Fatal("auth rejected")
 	}
-	client.Write([]byte{5, 3, 0, 1, 0, 0, 0, 0, 0, 0})
+	writeStatsFixture(t, client, []byte{5, 3, 0, 1, 0, 0, 0, 0, 0, 0})
 	reply := make([]byte, 10)
 	if _, err := io.ReadFull(client, reply); err != nil || reply[1] != 0 {
 		t.Fatal("UDP control rejected")
@@ -284,8 +336,10 @@ func TestRealAuthenticatedUDPControlCountsOneSessionAndNoControlBytes(t *testing
 	if row.ActiveUDP != 1 || row.ActiveTCP != 0 || row.TotalConnections != 1 {
 		t.Fatalf("control=%+v", row)
 	}
-	client.Write([]byte("keepalive"))
-	client.Close()
+	writeStatsFixture(t, client, []byte("keepalive"))
+	if err := client.Close(); err != nil {
+		t.Fatal(err)
+	}
 	select {
 	case <-done:
 	case <-time.After(time.Second):
@@ -314,27 +368,31 @@ func TestMalformedUnauthenticatedAndRejectedRequestsCannotCreateRows(t *testing.
 			go func() { s.serveTCP(server); close(done) }()
 			switch kind {
 			case "http":
-				client.Write([]byte("GET / HTTP/1.0\r\n\r\n"))
+				writeStatsFixture(t, client, []byte("GET / HTTP/1.0\r\n\r\n"))
 			case "no_auth":
-				client.Write([]byte{5, 1, 0})
+				writeStatsFixture(t, client, []byte{5, 1, 0})
 			default:
 				if !authenticateStatsClient(t, client, "fixture-password") {
 					t.Fatal("fixture auth rejected")
 				}
 				switch kind {
 				case "unsupported":
-					client.Write([]byte{5, 2, 0, 1, 192, 0, 2, 99, 0, 80})
+					writeStatsFixture(t, client, []byte{5, 2, 0, 1, 192, 0, 2, 99, 0, 80})
 				case "malformed":
-					client.Write([]byte{5, 1, 0, 99})
+					writeStatsFixture(t, client, []byte{5, 1, 0, 99})
 				case "failed_dial":
-					client.Write([]byte{5, 1, 0, 1, 192, 0, 2, 99, 0, 80})
+					writeStatsFixture(t, client, []byte{5, 1, 0, 1, 192, 0, 2, 99, 0, 80})
 				case "invalid_udp_source":
-					client.Write([]byte{5, 3, 0, 1, 192, 0, 2, 99, 0, 80})
+					writeStatsFixture(t, client, []byte{5, 3, 0, 1, 192, 0, 2, 99, 0, 80})
 				}
 			}
 			// Drain any bounded protocol error reply so the handler can finish.
-			io.Copy(io.Discard, client)
-			client.Close()
+			if _, err := io.Copy(io.Discard, client); err != nil && !errors.Is(err, net.ErrClosed) && !errors.Is(err, syscall.ECONNRESET) {
+				t.Fatal(err)
+			}
+			if err := client.Close(); err != nil {
+				t.Fatal(err)
+			}
 			select {
 			case <-done:
 			case <-time.After(time.Second):
@@ -358,7 +416,7 @@ func TestUDPStatsCountPartialUploadEvenWhenFlowFails(t *testing.T) {
 	}
 	defer s.closeUDPAssociation(association)
 	local, remote := net.Pipe()
-	defer remote.Close()
+	defer func() { _ = remote.Close() }()
 	s.cfg.DialUDP = func(context.Context, string, string) (net.Conn, error) { return partialStatsConn{local}, nil }
 	datagram := socks5.NewDatagram(socks5.ATYPIPv4, net.ParseIP("192.0.2.80").To4(), []byte{0, 53}, []byte("payload"))
 	if err := s.UDPHandle(s.server, peer, datagram); err == nil {

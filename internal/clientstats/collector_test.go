@@ -156,7 +156,10 @@ func TestCorruptOrOversizedHistoryIsNotOverwritten(t *testing.T) {
 			_ = c.Close()
 			t.Fatal("invalid history accepted")
 		}
-		got, _ := os.ReadFile(path)
+		got, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
 		if string(got) != data {
 			t.Fatal("invalid history overwritten")
 		}
@@ -182,7 +185,10 @@ func TestHistoryRejectsAmbiguousSchemaAndImpossibleTimes(t *testing.T) {
 	if err := c.Close(); err != nil {
 		t.Fatal(err)
 	}
-	valid, _ := os.ReadFile(path)
+	valid, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
 	cases := map[string][]byte{}
 	cases["duplicate"] = []byte(strings.Replace(string(valid), `"schema_version":1`, `"schema_version":1,"schema_version":1`, 1))
 	cases["missing_zero_field"] = []byte(strings.Replace(string(valid), `"download_bytes":0,`, "", 1))
@@ -191,7 +197,9 @@ func TestHistoryRejectsAmbiguousSchemaAndImpossibleTimes(t *testing.T) {
 	cases["null_clients"] = []byte(strings.Replace(string(valid), `"clients":[`, `"clients":null,"removed":[`, 1))
 	for _, kind := range []string{"metadata_order", "row_after_sample", "row_before_monitoring", "future_sample", "false_capacity"} {
 		var snapshot Snapshot
-		_ = json.Unmarshal(valid, &snapshot)
+		if err := json.Unmarshal(valid, &snapshot); err != nil {
+			t.Fatal(err)
+		}
 		switch kind {
 		case "metadata_order":
 			snapshot.MonitoredSince = snapshot.ProcessStartedAt + 1
@@ -204,7 +212,10 @@ func TestHistoryRejectsAmbiguousSchemaAndImpossibleTimes(t *testing.T) {
 		case "false_capacity":
 			snapshot.CapacityReached = true
 		}
-		data, _ := json.Marshal(snapshot)
+		data, err := json.Marshal(snapshot)
+		if err != nil {
+			t.Fatal(err)
+		}
 		cases[kind] = data
 	}
 	for kind, data := range cases {
@@ -217,7 +228,10 @@ func TestHistoryRejectsAmbiguousSchemaAndImpossibleTimes(t *testing.T) {
 				_ = collector.Close()
 				t.Fatal("invalid history accepted")
 			}
-			after, _ := os.ReadFile(target)
+			after, err := os.ReadFile(target)
+			if err != nil {
+				t.Fatal(err)
+			}
 			if string(after) != string(data) {
 				t.Fatal("rejected history was overwritten")
 			}

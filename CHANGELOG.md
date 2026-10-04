@@ -1,6 +1,6 @@
 # Changelog
 
-## 4.2.1-gk.10 — 2026-10-04
+## 4.2.1-gk.12 — 2026-10-04
 
 - Add optional durable SOCKS client monitoring to `socks` and `l4-socks` through `--client-stats-file` and `USQUE_CLIENT_STATS_FILE`. Group authenticated sessions by canonical remote IP, exclude anonymous sessions and loopback diagnostics, and record active TCP/UDP control sessions and successful payload bytes without credentials or destinations.
 - Retain cumulative history in atomic two-second snapshots with 4096 client records and explicit overflow totals. Monitored shutdown freezes counters and publishes zero active sessions; abrupt exits can lose the latest interval, so these counters are for monitoring rather than billing.
