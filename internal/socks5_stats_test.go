@@ -371,6 +371,13 @@ func TestMalformedUnauthenticatedAndRejectedRequestsCannotCreateRows(t *testing.
 				writeStatsFixture(t, client, []byte("GET / HTTP/1.0\r\n\r\n"))
 			case "no_auth":
 				writeStatsFixture(t, client, []byte{5, 1, 0})
+				reply := make([]byte, 2)
+				if _, err := io.ReadFull(client, reply); err != nil {
+					t.Fatal(err)
+				}
+				if reply[0] != 5 || reply[1] != 0xff {
+					t.Fatal("anonymous method was not rejected")
+				}
 			default:
 				if !authenticateStatsClient(t, client, "fixture-password") {
 					t.Fatal("fixture auth rejected")
@@ -386,9 +393,12 @@ func TestMalformedUnauthenticatedAndRejectedRequestsCannotCreateRows(t *testing.
 					writeStatsFixture(t, client, []byte{5, 3, 0, 1, 192, 0, 2, 99, 0, 80})
 				}
 			}
-			// Drain any bounded protocol error reply so the handler can finish.
-			if _, err := io.Copy(io.Discard, client); err != nil && !errors.Is(err, net.ErrClosed) && !errors.Is(err, syscall.ECONNRESET) {
-				t.Fatal(err)
+			// The dependency can await a request after returning method 0xff;
+			// close that client after asserting rejection instead of waiting for EOF.
+			if kind != "no_auth" {
+				if _, err := io.Copy(io.Discard, client); err != nil && !errors.Is(err, net.ErrClosed) && !errors.Is(err, syscall.ECONNRESET) {
+					t.Fatal(err)
+				}
 			}
 			if err := client.Close(); err != nil {
 				t.Fatal(err)
