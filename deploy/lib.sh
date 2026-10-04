@@ -20,23 +20,46 @@ lock_operations() {
 }
 
 load_env() {
-  local line key value
+  local file label line key value metadata owner mode links size
   export USQUE_CONFIG="$ETC/config.json" USQUE_BINARY="$ROOT/current/usque" USQUE_STATE=/run/usque/status.json
-  export USQUE_BIND=127.0.0.1 USQUE_PORT=903 USQUE_MODE=socks USQUE_DNS=
-  [[ -e $ETC/service.env ]] || return 0
-  while IFS= read -r line || [[ -n $line ]]; do
-    [[ $line =~ ^[[:space:]]*(#|$) ]] && continue
-    [[ $line =~ ^(USQUE_[A-Z0-9_]+)=(.*)$ ]] || { say 'Invalid service.env line; use KEY=value with no shell syntax.' >&2; return 1; }
-    key=${BASH_REMATCH[1]}; value=${BASH_REMATCH[2]}
-    case "$key" in
-      USQUE_CONFIG|USQUE_BINARY|USQUE_STATE|USQUE_BIND|USQUE_PORT|USQUE_MODE|USQUE_DNS|USQUE_ALLOW_PUBLIC|USQUE_HEALTH_URL|USQUE_HEALTH_INTERVAL|USQUE_HEALTH_TIMEOUT|USQUE_HEALTH_FAILURES|USQUE_DIAL_TIMEOUT|USQUE_SHUTDOWN_TIMEOUT|USQUE_BACKOFF_MIN|USQUE_BACKOFF_MAX|USQUE_HEALTHY_RESET|USQUE_ALWAYS_RECONNECT|USQUE_MTU|USQUE_HTTP2|USQUE_TRANSPORTS) ;;
-      *) say "Unsupported service.env key: $key" >&2; return 1 ;;
-    esac
-    # systemd EnvironmentFile and the management tool deliberately share this
-    # simple format. Never execute configuration as shell code.
-    [[ $value != *[[:space:]\"\'\`\$\\]* ]] || { say "Invalid service.env value for $key" >&2; return 1; }
-    export "$key=$value"
-  done < "$ETC/service.env"
+  export USQUE_BIND=127.0.0.1 USQUE_PORT=903 USQUE_MODE=socks USQUE_DNS= USQUE_SOCKS_AUTH_FILE=
+  # Match systemd's panel drop-in precedence without sourcing either file.
+  for file in "$ETC/service.env" "$ETC/panel.env"; do
+    [[ -e $file || -L $file ]] || continue
+    label=${file##*/}
+    if [[ $label == panel.env ]]; then
+      [[ -f $file && ! -L $file ]] || { say 'Invalid panel.env file ownership or permissions.' >&2; return 1; }
+      metadata=$(stat -c '%u:%a:%h:%s' -- "$file") || return 1
+      IFS=: read -r owner mode links size <<< "$metadata"
+      [[ $owner == 0 && $mode =~ ^[0-7]{3,4}$ && $links == 1 && $size =~ ^[0-9]+$ ]] &&
+        (( (8#$mode & 8#022) == 0 && size <= 4096 )) || {
+          say 'Invalid panel.env file ownership or permissions.' >&2; return 1;
+        }
+    fi
+    while IFS= read -r line || [[ -n $line ]]; do
+      [[ $line =~ ^[[:space:]]*(#|$) ]] && continue
+      [[ $line =~ ^(USQUE_[A-Z0-9_]+)=(.*)$ ]] || { say "Invalid $label line; use KEY=value with no shell syntax." >&2; return 1; }
+      key=${BASH_REMATCH[1]}; value=${BASH_REMATCH[2]}
+      if [[ $label == panel.env ]]; then
+        case "$key" in
+          USQUE_BIND|USQUE_PORT|USQUE_MTU|USQUE_ALLOW_PUBLIC|USQUE_SOCKS_AUTH_FILE) ;;
+          *) say "Unsupported panel.env key: $key" >&2; return 1 ;;
+        esac
+      fi
+      case "$key" in
+        USQUE_CONFIG|USQUE_BINARY|USQUE_STATE|USQUE_BIND|USQUE_PORT|USQUE_MODE|USQUE_DNS|USQUE_ALLOW_PUBLIC|USQUE_HEALTH_URL|USQUE_HEALTH_INTERVAL|USQUE_HEALTH_TIMEOUT|USQUE_HEALTH_FAILURES|USQUE_DIAL_TIMEOUT|USQUE_SHUTDOWN_TIMEOUT|USQUE_BACKOFF_MIN|USQUE_BACKOFF_MAX|USQUE_HEALTHY_RESET|USQUE_ALWAYS_RECONNECT|USQUE_MTU|USQUE_HTTP2|USQUE_TRANSPORTS|USQUE_SOCKS_AUTH_FILE) ;;
+        *) say "Unsupported $label key: $key" >&2; return 1 ;;
+      esac
+      # Only the path is configuration; credentials remain in the private JSON.
+      if [[ $key == USQUE_SOCKS_AUTH_FILE && -n $value && $value != /etc/usque/socks-auth.json ]]; then
+        say "Invalid $label value for $key" >&2; return 1
+      fi
+      # systemd EnvironmentFile and the management tool deliberately share this
+      # simple format. Never execute configuration as shell code.
+      [[ $value != *[[:space:]\"\'\`\$\\]* ]] || { say "Invalid $label value for $key" >&2; return 1; }
+      export "$key=$value"
+    done < "$file"
+  done
   [[ $USQUE_CONFIG == "$ETC/config.json" && $USQUE_BINARY == "$ROOT/current/usque" ]] || {
     say 'Keep USQUE_CONFIG and USQUE_BINARY at their managed paths.' >&2; return 1;
   }
@@ -265,6 +288,11 @@ switch_release() {
   # Older management tools reject unknown service.env keys even when their
   # supervisor ignores them. Reject an incompatible switch before changing the
   # active release instead of leaving rollback management unusable.
+  if [[ -n ${USQUE_SOCKS_AUTH_FILE:-} ]] &&
+     ! grep -qw 'USQUE_SOCKS_AUTH_FILE' "$next/deploy/lib.sh"; then
+    say 'Target release does not support managed SOCKS authentication. Current release was not changed.' >&2
+    return 1
+  fi
   if [[ -f $ETC/service.env ]] && grep -q '^USQUE_DNS=' "$ETC/service.env" &&
      ! grep -qw 'USQUE_DNS' "$next/deploy/lib.sh"; then
     say 'Target release does not support USQUE_DNS. Current release was not changed.' >&2

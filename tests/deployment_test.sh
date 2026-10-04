@@ -7,6 +7,9 @@ repo=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 if [[ ${1:-} != --case ]]; then
   for script in "$repo/install.sh" "$repo/scripts/usquectl" "$repo/deploy/lib.sh"; do bash -n "$script"; done
   cases=(env_defaults env_injection env_unknown env_dns env_dns_legacy env_dns_injection
+    env_auth_defaults env_auth_service env_panel_override env_panel_without_service env_panel_injection
+    env_auth_path env_panel_ownership env_panel_symlink env_panel_writable env_panel_unknown
+    panel_health_update switch_unsupported_auth
     atomic_switch switch_rollback switch_success switch_restart_error switch_unsupported_dns switch_supported_dns
     switch_activate_error switch_previous_error switch_restore_error
     import_invalid import_rollback import_success import_restore_error register_preserves register_failure
@@ -26,6 +29,7 @@ fi
 
 # shellcheck source=deploy/lib.sh
 source "$repo/deploy/lib.sh"
+eval "$(declare -f wait_healthy | sed '1s/wait_healthy/real_wait_healthy/')"
 work=$(mktemp -d)
 trap 'rm -rf -- "$work"' EXIT
 ROOT="$work/opt/usque"
@@ -98,6 +102,14 @@ install() {
   else command install "${args[@]}"; fi
 }
 wait_healthy() { [[ $(cat "$ROOT/current/VERSION") != v2.0.0 ]]; }
+
+# The private fixture is owned by the test runner. Preserve actual type/mode,
+# link-count and size checks while substituting only its production root owner.
+panel_stat() {
+  if [[ $1 == -c && $2 == '%u:%a:%h:%s' ]]; then
+    printf '%s:%s\n' "${fixture_panel_owner:-0}" "$(command stat -c '%a:%h:%s' -- "${@: -1}")"
+  else command stat "$@"; fi
+}
 
 case $2 in
   doctor_*)
@@ -180,6 +192,93 @@ case $2 in
     printf 'USQUE_DNS=$(touch %s/EXECUTED)\n' "$work" > "$ETC/service.env"
     assert_fails load_env
     [[ ! -e $work/EXECUTED ]]
+    ;;
+  env_auth_defaults)
+    export USQUE_SOCKS_AUTH_FILE=/tmp/inherited.json
+    load_env
+    assert_equal "$USQUE_SOCKS_AUTH_FILE" ''
+    ;;
+  env_auth_service)
+    printf 'USQUE_SOCKS_AUTH_FILE=/etc/usque/socks-auth.json\n' > "$ETC/service.env"
+    load_env
+    assert_equal "$USQUE_SOCKS_AUTH_FILE" /etc/usque/socks-auth.json
+    ;;
+  env_panel_override|env_panel_without_service|panel_health_update)
+    stat() { panel_stat "$@"; }
+    if [[ $2 != env_panel_without_service ]]; then
+      printf 'USQUE_BIND=127.0.0.1\nUSQUE_PORT=903\nUSQUE_MTU=1280\nUSQUE_SOCKS_AUTH_FILE=\n' > "$ETC/service.env"
+    fi
+    printf 'USQUE_BIND=0.0.0.0\nUSQUE_PORT=1903\nUSQUE_MTU=1200\nUSQUE_ALLOW_PUBLIC=true\nUSQUE_SOCKS_AUTH_FILE=/etc/usque/socks-auth.json\n' > "$ETC/panel.env"
+    chmod 0600 "$ETC/panel.env"
+    load_env
+    assert_equal "$USQUE_BIND" 0.0.0.0
+    assert_equal "$USQUE_PORT" 1903
+    assert_equal "$USQUE_MTU" 1200
+    assert_equal "$USQUE_ALLOW_PUBLIC" true
+    assert_equal "$USQUE_SOCKS_AUTH_FILE" /etc/usque/socks-auth.json
+    if [[ $2 == panel_health_update ]]; then
+      cat > "$ROOT/releases/v1.0.0/usque-supervisor" <<'MOCK'
+#!/usr/bin/env bash
+case $1 in
+  status) printf '{"status":"healthy","supervisor_pid":345}\n' ;;
+  health)
+    [[ $# == 1 && $USQUE_PORT == 1903 && $USQUE_BIND == 0.0.0.0 && $USQUE_SOCKS_AUTH_FILE == /etc/usque/socks-auth.json ]] || exit 1
+    printf 'health\n' >> "$HEALTH_CALLS"
+    ;;
+  *) exit 1 ;;
+esac
+MOCK
+      cp "$ROOT/releases/v1.0.0/usque-supervisor" "$ROOT/releases/v2.0.0/"
+      export HEALTH_CALLS="$work/health.calls"
+      systemctl() {
+        printf '%s\n' "$*" >> "$work/systemctl.calls"
+        [[ $1 != show ]] || printf '345\n'
+      }
+      jq() { return 0; }
+      wait_healthy() { real_wait_healthy; }
+      latest_release() { printf 'v2.0.0\n'; }
+      download_release() { return 0; }
+      store_release() { return 0; }
+      READY_TIMEOUT=1
+      probe
+      update_release
+      assert_equal "$(cat "$ROOT/current/VERSION")" v2.0.0
+      assert_equal "$(wc -l < "$work/health.calls" | tr -d ' ')" 2
+    fi
+    ;;
+  env_panel_injection|env_auth_path|env_panel_ownership|env_panel_symlink|env_panel_writable|env_panel_unknown)
+    stat() { panel_stat "$@"; }
+    printf 'USQUE_PORT=1903\n' > "$ETC/panel.env"
+    chmod 0600 "$ETC/panel.env"
+    case $2 in
+      env_panel_injection)
+        # shellcheck disable=SC2016
+        printf 'USQUE_PORT=$(touch %s/EXECUTED)\n' "$work" > "$ETC/panel.env"
+        ;;
+      env_auth_path)
+        printf 'USQUE_SOCKS_AUTH_FILE=/tmp/unsupported.json\n' > "$ETC/service.env"
+        assert_fails load_env
+        rm "$ETC/service.env"
+        printf 'USQUE_SOCKS_AUTH_FILE=/tmp/unsupported.json\n' > "$ETC/panel.env"
+        ;;
+      env_panel_ownership) fixture_panel_owner=1001 ;;
+      env_panel_symlink)
+        mv "$ETC/panel.env" "$work/panel.env"
+        ln -s "$work/panel.env" "$ETC/panel.env"
+        ;;
+      env_panel_writable) chmod 0660 "$ETC/panel.env" ;;
+      env_panel_unknown) printf 'USQUE_BINARY=/tmp/untrusted\n' > "$ETC/panel.env" ;;
+    esac
+    assert_fails load_env
+    [[ ! -e $work/EXECUTED ]]
+    ;;
+  switch_unsupported_auth)
+    export USQUE_SOCKS_AUTH_FILE=/etc/usque/socks-auth.json
+    printf '# Older release without native SOCKS auth support\n' > "$ROOT/releases/v0.9.0/deploy/lib.sh"
+    assert_fails rollback_release
+    assert_equal "$(cat "$ROOT/current/VERSION")" v1.0.0
+    assert_equal "$(cat "$ROOT/previous/VERSION")" v0.9.0
+    [[ ! -e $work/systemctl.calls ]]
     ;;
   atomic_switch)
     atomic_link "$ROOT/releases/v2.0.0" "$ROOT/current"
