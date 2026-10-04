@@ -37,6 +37,7 @@ func execute(args []string) error {
 	if command == "help" || command == "--help" || command == "-h" {
 		fmt.Println("Usage: usque-supervisor [run|health|status|validate-config [path]|version]")
 		fmt.Println("Service settings come from USQUE_* environment variables; see /etc/usque/service.env.")
+		fmt.Println("USQUE_SOCKS_AUTH_FILE selects a private root:usque 0640 JSON file for SOCKS credentials.")
 		return nil
 	}
 	if command == "validate-config" {
@@ -75,7 +76,7 @@ func execute(args []string) error {
 		runner := supervisor.Runner{Config: cfg, Version: version}
 		return runner.Run(context.Background(), signals)
 	case "health":
-		probe := supervisor.Probe{Address: cfg.SOCKSAddress(), URL: cfg.HealthURL, Timeout: cfg.HealthTimeout}
+		probe := supervisor.Probe{Address: cfg.SOCKSAddress(), URL: cfg.HealthURL, Timeout: cfg.HealthTimeout, AuthFile: cfg.SOCKSAuthFile}
 		result, err := probe.Check(context.Background())
 		if err != nil {
 			return err

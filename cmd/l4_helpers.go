@@ -52,6 +52,11 @@ func buildL4Proxy(cmd *cobra.Command, mode string) (l4ProxyOptions, *api.L4Proxy
 	if opts.password, err = cmd.Flags().GetString("password"); err != nil {
 		return opts, nil, fmt.Errorf("failed to get password: %v", err)
 	}
+	if mode == "l4-socks" {
+		if opts.username, opts.password, err = socksCredentials(cmd); err != nil {
+			return opts, nil, err
+		}
+	}
 	if opts.connectPort, err = cmd.Flags().GetInt("connect-port"); err != nil {
 		return opts, nil, fmt.Errorf("failed to get connect port: %v", err)
 	}

@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Diniboy1123/usque/internal/socksauth"
+
 	"golang.org/x/net/proxy"
 )
 
@@ -22,9 +24,10 @@ type HealthResult struct {
 // is delegated to SOCKS, avoiding a successful host-side DNS lookup masking a
 // broken tunnel DNS path in full socks mode. L4 mode itself uses host-side DNS.
 type Probe struct {
-	Address string
-	URL     string
-	Timeout time.Duration
+	Address  string
+	URL      string
+	Timeout  time.Duration
+	AuthFile string
 	// TLSConfig is only needed by callers using a private, trusted trace endpoint.
 	// The service CLI never disables TLS certificate verification.
 	TLSConfig *tls.Config
@@ -49,8 +52,18 @@ func (p Probe) Check(ctx context.Context) (HealthResult, error) {
 	if !ok {
 		return result, fmt.Errorf("SOCKS dialer does not support cancellation")
 	}
+	dialContext := contextDialer.DialContext
+	if p.AuthFile != "" {
+		credentials, err := socksauth.Load(p.AuthFile)
+		if err != nil {
+			return result, err
+		}
+		dialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+			return authenticatedSOCKSDial(ctx, p.Address, network, address, credentials)
+		}
+	}
 	transport := &http.Transport{
-		Proxy: nil, DialContext: contextDialer.DialContext, TLSClientConfig: p.TLSConfig,
+		Proxy: nil, DialContext: dialContext, TLSClientConfig: p.TLSConfig,
 		TLSHandshakeTimeout: p.Timeout, ResponseHeaderTimeout: p.Timeout, DisableKeepAlives: true,
 	}
 	defer transport.CloseIdleConnections()

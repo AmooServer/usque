@@ -55,6 +55,7 @@ var l4SocksCmd = &cobra.Command{
 
 func init() {
 	addL4ProxyFlags(l4SocksCmd, "1080", "SOCKS")
+	l4SocksCmd.Flags().String("socks-auth-file", "", "Private root:usque 0640 JSON file with SOCKS username and password (Linux)")
 	l4SocksCmd.Flags().Duration("dial-timeout", 15*time.Second, "Maximum time for SOCKS DNS resolution and connection establishment")
 	rootCmd.AddCommand(l4SocksCmd)
 }

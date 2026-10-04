@@ -178,13 +178,9 @@ var socksCmd = &cobra.Command{
 			log.Println("Warning: MTU is not the default 1280. This is not supported. Packet loss and other issues may occur.")
 		}
 
-		var username string
-		var password string
-		if u, err := cmd.Flags().GetString("username"); err == nil && u != "" {
-			username = u
-		}
-		if p, err := cmd.Flags().GetString("password"); err == nil && p != "" {
-			password = p
+		username, password, err := socksCredentials(cmd)
+		if err != nil {
+			return err
 		}
 
 		reconnectDelay, err := cmd.Flags().GetDuration("reconnect-delay")
@@ -280,6 +276,7 @@ func init() {
 	socksCmd.Flags().StringP("port", "p", "1080", "Port to listen on for SOCKS proxy")
 	socksCmd.Flags().StringP("username", "u", "", "Username for proxy authentication (specify both username and password to enable)")
 	socksCmd.Flags().StringP("password", "w", "", "Password for proxy authentication (specify both username and password to enable)")
+	socksCmd.Flags().String("socks-auth-file", "", "Private root:usque 0640 JSON file with SOCKS username and password (Linux)")
 	socksCmd.Flags().IntP("connect-port", "P", 443, "Used port for MASQUE connection")
 	socksCmd.Flags().StringArrayP("dns", "d", []string{"9.9.9.9", "149.112.112.112", "2620:fe::fe", "2620:fe::9"}, "DNS servers for the tunnel stack; with -l also used for SOCKS name lookups (unless --system-dns)")
 	socksCmd.Flags().DurationP("dns-timeout", "t", 2*time.Second, "Timeout for DNS queries")

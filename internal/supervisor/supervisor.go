@@ -62,7 +62,7 @@ func (r *Runner) Run(ctx context.Context, signals <-chan os.Signal) error {
 		r.Output = os.Stdout
 	}
 	if r.Probe == nil {
-		p := Probe{Address: r.Config.SOCKSAddress(), URL: r.Config.HealthURL, Timeout: r.Config.HealthTimeout}
+		p := Probe{Address: r.Config.SOCKSAddress(), URL: r.Config.HealthURL, Timeout: r.Config.HealthTimeout, AuthFile: r.Config.SOCKSAuthFile}
 		r.Probe = func(ctx context.Context) error { _, err := p.Check(ctx); return err }
 	}
 	transports := r.Config.Transports
@@ -97,7 +97,11 @@ func (r *Runner) Run(ctx context.Context, signals <-chan os.Signal) error {
 	defer func() { state.Status = "stopped"; state.ChildPID = 0; publish() }()
 	b := backoff{min: r.Config.BackoffMin, max: r.Config.BackoffMax, random: r.random}
 	if r.Config.AllowPublic {
-		r.Logger.Print("WARNING: public SOCKS listening is enabled; traffic is unauthenticated and unencrypted")
+		if r.Config.SOCKSAuthFile == "" {
+			r.Logger.Print("WARNING: public SOCKS listening is enabled; traffic is unauthenticated and unencrypted")
+		} else {
+			r.Logger.Print("WARNING: public SOCKS listening is enabled; traffic is unencrypted")
+		}
 	}
 	if r.Config.Mode == "l4-socks" {
 		r.Logger.Print("l4-socks is TCP-only and resolves destination names with the host resolver")

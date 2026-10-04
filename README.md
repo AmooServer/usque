@@ -70,6 +70,7 @@ sudo usquectl uninstall
 | --- | --- | --- |
 | `/etc/usque/config.json` | WARP key, token, endpoints | `root:usque`, `0640` |
 | `/etc/usque/service.env` | Service settings; no credentials | `root:usque`, `0640` |
+| `/etc/usque/socks-auth.json` | Optional native SOCKS username/password | `root:usque`, `0640` |
 | `/etc/usque/backups/` | Configuration backups | `root:root`, directory `0700` |
 | `/run/usque/status.json` | Runtime health/restart state | service-owned, private |
 | `/opt/usque/releases/` | Immutable release payloads | root-owned |
@@ -79,6 +80,7 @@ Use `sudoedit /etc/usque/service.env`, then `sudo usquectl restart`. Use simple 
 | Setting | Default |
 | --- | --- |
 | `USQUE_BIND`, `USQUE_PORT`, `USQUE_MODE` | `127.0.0.1`, `903`, `socks` |
+| `USQUE_SOCKS_AUTH_FILE` | unset; optional private SOCKS credential file |
 | `USQUE_HEALTH_INTERVAL`, `USQUE_HEALTH_TIMEOUT` | `5s`, `5s` in the shipped profile (`20s`, `8s` when unset) |
 | `USQUE_HEALTH_FAILURES` | `2` in the shipped profile (`3` when unset) |
 | `USQUE_DIAL_TIMEOUT`, `USQUE_SHUTDOWN_TIMEOUT` | `8s`, `8s` |
@@ -93,6 +95,12 @@ Probe intervals start after completion of the previous probe. With the shipped p
 Full `socks` is the production default for UDP workloads. Set `USQUE_MODE=l4-socks` only for TCP-only workloads: MTU/reconnect flags do not apply, and HTTP/2 is unavailable. Full `socks` supports `USQUE_HTTP2=true` for testing TCP/TLS when UDP/QUIC is problematic.
 
 `USQUE_TRANSPORTS` is a MASQUE failover list. The supervisor starts the first entry; after every restart (failed health checks or a child exit) the next child uses the next entry, wrapping around. A stalled QUIC path is therefore retried over HTTP/2 and then over QUIC on another port instead of the same path. `usquectl status` and `/run/usque/status.json` report the active `transport`. `l4-socks` accepts `quic:` entries only. Existing installations keep their `/etc/usque/service.env` on update; add the line yourself to enable failover.
+
+For native SOCKS authentication, set `USQUE_SOCKS_AUTH_FILE=/etc/usque/socks-auth.json` and restart the service. The Linux credential file must be a regular file owned by `root:usque`, mode exactly `0640`, and cannot be a symlink. Its bounded JSON object contains only `username` and `password`; both must contain 1..255 UTF-8 bytes. The native `socks` and `l4-socks` commands accept the same path through `--socks-auth-file`. Do not combine that flag with the legacy username/password flags. The supervisor and its local health probes read the file; only its path enters child arguments. Invalid files stop startup without revealing their contents. Restart after changing credentials so the child and probes use the same values.
+
+There is no built-in default SOCKS username or password. The managed panel requires a privately supplied nonempty username and password for the first authenticated configuration; leaving the password blank on later edits preserves the existing secret. It writes `/etc/usque/socks-auth.json` and configures `USQUE_SOCKS_AUTH_FILE`. The native default remains an unauthenticated loopback service until this setting is configured. Authenticated health checks require username/password negotiation and reject an anonymous fallback.
+
+SOCKS UDP replies preserve the authenticated TCP association's local IPv4 address. This keeps replies to separate public/private listeners on their original address without changing the WARP transport's source selection.
 
 ## Xray, sing-box and Hysteria
 
@@ -134,7 +142,7 @@ Start with `sudo usquectl doctor` and `sudo usquectl logs`. [Operations](docs/OP
 
 The installer raises `net.core.rmem_max` and `net.core.wmem_max` to at least `7500000` only when needed, preserving larger values. Managed settings are in `/etc/sysctl.d/90-usque-buffers.conf`. Routing and firewall rules are not changed.
 
-SOCKS has no authentication or encryption. **Other local users can use the loopback listener.** Public listening requires both an explicit bind change and `USQUE_ALLOW_PUBLIC=true`; protect it with a firewall and an authenticated encrypted frontend. Port 903 needs `CAP_NET_BIND_SERVICE` on stock Ubuntu. This is the unit's only capability; the supervisor and child run as `usque`, not root.
+SOCKS has no encryption. Without `USQUE_SOCKS_AUTH_FILE`, **other local users can use the loopback listener without authentication**. Public listening requires both an explicit bind change and `USQUE_ALLOW_PUBLIC=true`; configure native authentication and protect it with a firewall and an encrypted frontend. Port 903 needs `CAP_NET_BIND_SERVICE` on stock Ubuntu. This is the unit's only capability; the supervisor and child run as `usque`, not root.
 
 Never publish configuration, registration output, private keys, tokens, or license keys. Uninstall removes/disables the service and command links while preserving config, backups, releases, system user and buffer settings for deliberate recovery.
 

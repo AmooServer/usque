@@ -31,6 +31,7 @@ archives:
     files:
       - LICENSE.md
       - README.md
+      - CHANGELOG.md
       - src: scripts/usquectl
         dst: usquectl
         info:

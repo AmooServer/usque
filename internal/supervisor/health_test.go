@@ -60,8 +60,33 @@ func testSOCKS(t *testing.T, target, mode string) (string, <-chan string) {
 					_, _ = conn.Write([]byte{5, 255})
 					return
 				}
-				if _, err := conn.Write([]byte{5, 0}); err != nil {
+				method := byte(0)
+				if mode == "auth" {
+					method = 2
+				}
+				if _, err := conn.Write([]byte{5, method}); err != nil {
 					return
+				}
+				if mode == "auth" {
+					h := make([]byte, 2)
+					if _, err := io.ReadFull(conn, h); err != nil {
+						return
+					}
+					u := make([]byte, int(h[1])+1)
+					if _, err := io.ReadFull(conn, u); err != nil {
+						return
+					}
+					p := make([]byte, int(u[len(u)-1]))
+					if _, err := io.ReadFull(conn, p); err != nil {
+						return
+					}
+					if h[0] != 1 || string(u[:len(u)-1]) != "health-user" || string(p) != "health-password" {
+						_, _ = conn.Write([]byte{1, 1})
+						return
+					}
+					if _, err := conn.Write([]byte{1, 0}); err != nil {
+						return
+					}
 				}
 				req := make([]byte, 5)
 				if _, err := io.ReadFull(conn, req); err != nil {

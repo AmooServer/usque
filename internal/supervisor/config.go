@@ -9,11 +9,14 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/Diniboy1123/usque/internal/socksauth"
 )
 
 // Config contains service settings, never WARP credentials.
 type Config struct {
 	Binary, ConfigPath, StatePath, Bind, Mode, HealthURL string
+	SOCKSAuthFile                                        string
 	DNS                                                  []string
 	Port, HealthFailures, MTU                            int
 	HTTP2, AlwaysReconnect, AllowPublic                  bool
@@ -64,6 +67,7 @@ func FromEnvironment(getenv func(string) string) (Config, error) {
 	for key, dst := range map[string]*string{
 		"USQUE_BINARY": &c.Binary, "USQUE_CONFIG": &c.ConfigPath, "USQUE_STATE": &c.StatePath,
 		"USQUE_BIND": &c.Bind, "USQUE_MODE": &c.Mode, "USQUE_HEALTH_URL": &c.HealthURL,
+		"USQUE_SOCKS_AUTH_FILE": &c.SOCKSAuthFile,
 	} {
 		if value := getenv(key); value != "" {
 			*dst = value
@@ -116,6 +120,11 @@ func FromEnvironment(getenv func(string) string) (Config, error) {
 }
 
 func (c Config) Validate() error {
+	if c.SOCKSAuthFile != "" {
+		if _, err := socksauth.Load(c.SOCKSAuthFile); err != nil {
+			return err
+		}
+	}
 	absolute := func(path string) bool { return filepath.IsAbs(path) || strings.HasPrefix(path, "/") }
 	if !absolute(c.Binary) || !absolute(c.ConfigPath) || !absolute(c.StatePath) {
 		return fmt.Errorf("USQUE_BINARY, USQUE_CONFIG and USQUE_STATE must be absolute paths")
@@ -201,6 +210,9 @@ func (c Config) ChildArgs() []string {
 // ChildArgsFor returns the child arguments for one MASQUE transport.
 func (c Config) ChildArgsFor(t Transport) []string {
 	args := []string{"-c", c.ConfigPath, c.Mode, "-b", c.Bind, "-p", strconv.Itoa(c.Port), "--dial-timeout", c.DialTimeout.String()}
+	if c.SOCKSAuthFile != "" {
+		args = append(args, "--socks-auth-file", c.SOCKSAuthFile)
+	}
 	if c.Mode == "socks" {
 		args = append(args, "--mtu", strconv.Itoa(c.MTU), "--always-reconnect="+strconv.FormatBool(c.AlwaysReconnect), "--http2="+strconv.FormatBool(t.HTTP2))
 	}

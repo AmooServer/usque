@@ -15,8 +15,10 @@ import (
 type udpAssociation struct {
 	source string
 	peerIP string
-	ctx    context.Context
-	cancel context.CancelFunc
+	// localIP is an immutable copy of the authenticated TCP socket's local address.
+	localIP net.IP
+	ctx     context.Context
+	cancel  context.CancelFunc
 }
 
 func isZeroUDPAssociateRequest(r *socks5.Request) bool {
@@ -31,7 +33,7 @@ func isZeroUDPAssociateRequest(r *socks5.Request) bool {
 	}
 }
 
-func (s *SOCKS5Server) registerUDPAssociation(r *socks5.Request, peer net.Addr) (*udpAssociation, error) {
+func (s *SOCKS5Server) registerUDPAssociation(r *socks5.Request, peer net.Addr, local ...net.Addr) (*udpAssociation, error) {
 	peerHost, peerPort, err := net.SplitHostPort(peer.String())
 	if err != nil {
 		return nil, err
@@ -83,6 +85,11 @@ func (s *SOCKS5Server) registerUDPAssociation(r *socks5.Request, peer net.Addr) 
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	a := &udpAssociation{source: source, peerIP: peerIP.String(), ctx: ctx, cancel: cancel}
+	if len(local) > 0 {
+		if addr, ok := local[0].(*net.TCPAddr); ok && !addr.IP.IsUnspecified() {
+			a.localIP = append(net.IP(nil), addr.IP...)
+		}
+	}
 	if source == "" {
 		s.pendingUDP[a.peerIP] = append(s.pendingUDP[a.peerIP], a)
 	} else {

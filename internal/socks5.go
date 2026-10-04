@@ -14,6 +14,7 @@ import (
 
 	"github.com/txthinking/runnergroup"
 	"github.com/txthinking/socks5"
+	"golang.org/x/net/ipv4"
 	"golang.zx2c4.com/wireguard/tun/netstack"
 )
 
@@ -357,7 +358,7 @@ func (s *SOCKS5Server) TCPHandle(srv *socks5.Server, c *net.TCPConn, r *socks5.R
 		return nil
 
 	case socks5.CmdUDP:
-		assoc, err := s.registerUDPAssociation(r, c.RemoteAddr())
+		assoc, err := s.registerUDPAssociation(r, c.RemoteAddr(), c.LocalAddr())
 		if err != nil {
 			_, _ = socks5.NewReply(socks5.RepHostUnreachable, socks5.ATYPIPv4, net.IPv4zero.To4(), []byte{0, 0}).WriteTo(c)
 			return err
@@ -594,7 +595,11 @@ func (s *SOCKS5Server) UDPHandle(srv *socks5.Server, addr *net.UDPAddr, d *socks
 				w = append(w, dg.DstAddr...)
 				w = append(w, dg.DstPort...)
 				w = append(w, dg.Data...)
-				_, err = srv.UDPConn.WriteToUDP(w, ue.ClientAddr)
+				if assoc != nil && assoc.localIP.To4() != nil && ue.ClientAddr.IP.To4() != nil {
+					_, err = ipv4.NewPacketConn(srv.UDPConn).WriteTo(w, &ipv4.ControlMessage{Src: assoc.localIP}, ue.ClientAddr)
+				} else {
+					_, err = srv.UDPConn.WriteToUDP(w, ue.ClientAddr)
+				}
 				*wp = w
 				udpWireBufPool.Put(wp)
 				if err != nil {
