@@ -48,6 +48,7 @@ type SOCKS5Server struct {
 	pendingUDP       map[string][]*udpAssociation
 	associatedUDP    map[string]*udpAssociation
 	udpFlows         sync.Map // udpFlowKey -> *socks5.UDPExchange
+	udpDialing       sync.Map // udpFlowKey -> *udpDial, one in-flight dial per flow
 	udpFlowLocks     [64]sync.Mutex
 }
 
@@ -146,6 +147,9 @@ const maxConcurrentUDPRelayHandlers = 256
 
 var udpRelaySem = make(chan struct{}, maxConcurrentUDPRelayHandlers)
 
+// maxUDPRelaysPerAssociation keeps one client from exhausting udpRelaySem.
+const maxUDPRelaysPerAssociation = 64
+
 func (s *SOCKS5Server) Start() error {
 	return s.listenAndServe()
 }
@@ -222,7 +226,13 @@ func (s *SOCKS5Server) listenAndServe() error {
 					udpReadBufPool.Put(bp)
 					return err
 				}
-				udpClientHandleSem <- struct{}{}
+				// Never block the single read loop: drop the datagram when saturated.
+				select {
+				case udpClientHandleSem <- struct{}{}:
+				default:
+					udpReadBufPool.Put(bp)
+					continue
+				}
 				go func(addr *net.UDPAddr, bp *[]byte, n int) {
 					defer func() {
 						udpReadBufPool.Put(bp)
@@ -574,36 +584,84 @@ func (s *SOCKS5Server) UDPHandle(srv *socks5.Server, addr *net.UDPAddr, d *socks
 	key := udpFlowKey{source: src, destination: dst, association: assoc}
 	// Serialize creation and sends for each flow, without holding the association lock during I/O.
 	flowLock := s.udpFlowLock(src, dst)
-	flowLock.Lock()
-	defer flowLock.Unlock()
 	dialCtx := context.Background()
 	if assoc != nil {
 		dialCtx = assoc.ctx
+	}
+	// Never hold flowLock while dialing, or one slow dial stalls every flow hashed to it.
+	// Concurrent first packets of a flow wait for the single in-flight dial instead.
+	var dial *udpDial
+	for dial == nil {
+		flowLock.Lock()
 		// A queued packet may have claimed ownership before the TCP control
 		// connection closed. Do not start another dial after it gets the lock.
 		if err := dialCtx.Err(); err != nil {
+			flowLock.Unlock()
 			return err
 		}
+		if iue, ok := s.udpFlows.Load(key); ok {
+			err := send(iue.(*socks5.UDPExchange), d.Data)
+			flowLock.Unlock()
+			return err
+		}
+		cur, loaded := s.udpDialing.LoadOrStore(key, &udpDial{done: make(chan struct{})})
+		flowLock.Unlock()
+		if !loaded {
+			dial = cur.(*udpDial)
+			break
+		}
+		select {
+		case <-cur.(*udpDial).done:
+			if err := cur.(*udpDial).err; err != nil {
+				return err
+			}
+		case <-dialCtx.Done():
+			return dialCtx.Err()
+		}
 	}
-	if iue, ok := s.udpFlows.Load(key); ok {
-		return send(iue.(*socks5.UDPExchange), d.Data)
+	finish := func(err error) {
+		dial.err = err
+		s.udpDialing.Delete(key)
+		close(dial.done)
 	}
 
+	release := func() {
+		<-udpRelaySem
+		if assoc != nil {
+			assoc.relays.Add(-1)
+		}
+	}
+	fail := func(err error) error {
+		flowLock.Lock()
+		finish(err)
+		flowLock.Unlock()
+		return err
+	}
+	if assoc != nil && assoc.relays.Add(1) > maxUDPRelaysPerAssociation {
+		assoc.relays.Add(-1)
+		return fail(fmt.Errorf("too many UDP relay exchanges for this association"))
+	}
 	select {
 	case udpRelaySem <- struct{}{}:
 	default:
-		return fmt.Errorf("too many active UDP relay exchanges")
+		if assoc != nil {
+			assoc.relays.Add(-1)
+		}
+		return fail(fmt.Errorf("too many active UDP relay exchanges"))
 	}
 
 	rc, err := s.dialUDPContext(dialCtx, "udp", "", dst)
 	if err != nil {
-		<-udpRelaySem
-		return err
+		release()
+		return fail(err)
 	}
 	ue := &socks5.UDPExchange{
 		ClientAddr: addr,
 		RemoteConn: rc,
 	}
+	flowLock.Lock()
+	defer flowLock.Unlock()
+	defer finish(nil)
 	stopClose := func() bool { return true }
 	if assoc != nil {
 		stopClose = context.AfterFunc(assoc.ctx, func() { _ = rc.Close() })
@@ -611,7 +669,7 @@ func (s *SOCKS5Server) UDPHandle(srv *socks5.Server, addr *net.UDPAddr, d *socks
 	if err := send(ue, d.Data); err != nil {
 		stopClose()
 		_ = ue.RemoteConn.Close()
-		<-udpRelaySem
+		release()
 		return err
 	}
 	s.udpFlows.Store(key, ue)
@@ -623,7 +681,7 @@ func (s *SOCKS5Server) UDPHandle(srv *socks5.Server, addr *net.UDPAddr, d *socks
 			flowLock.Lock()
 			s.udpFlows.Delete(key)
 			flowLock.Unlock()
-			<-udpRelaySem
+			release()
 		}()
 		// A stack [65507]byte here escapes to the heap per goroutine (~64 KiB each);
 		// with hundreds of DHT peers that dominates inuse_space.
@@ -683,6 +741,12 @@ func (s *SOCKS5Server) UDPHandle(srv *socks5.Server, addr *net.UDPAddr, d *socks
 	}(ue, dst)
 
 	return nil
+}
+
+// udpDial is a flow's in-flight dial; err is set before done closes.
+type udpDial struct {
+	done chan struct{}
+	err  error
 }
 
 type udpFlowKey struct {

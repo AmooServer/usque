@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"net"
+	"sync/atomic"
 
 	"github.com/Diniboy1123/usque/internal/clientstats"
 	"github.com/txthinking/socks5"
@@ -21,6 +22,7 @@ type udpAssociation struct {
 	ctx     context.Context
 	cancel  context.CancelFunc
 	session *clientstats.Session // Immutable authenticated TCP peer accounting reference.
+	relays  atomic.Int32         // Active UDP relay exchanges owned by this association.
 }
 
 func isZeroUDPAssociateRequest(r *socks5.Request) bool {
@@ -44,7 +46,7 @@ func (s *SOCKS5Server) registerUDPAssociation(r *socks5.Request, peer net.Addr, 
 }
 
 func (s *SOCKS5Server) registerUDPAssociationWithSession(r *socks5.Request, peer, local net.Addr, session *clientstats.Session) (*udpAssociation, error) {
-	peerHost, peerPort, err := net.SplitHostPort(peer.String())
+	peerHost, _, err := net.SplitHostPort(peer.String())
 	if err != nil {
 		return nil, err
 	}
@@ -80,10 +82,9 @@ func (s *SOCKS5Server) registerUDPAssociationWithSession(r *socks5.Request, peer
 		if !ip.Equal(peerIP) {
 			return nil, fmt.Errorf("UDP ASSOCIATE source must match TCP peer IP")
 		}
-		port := binary.BigEndian.Uint16(r.DstPort)
-		if port == 0 {
-			source = net.JoinHostPort(ip.String(), peerPort)
-		} else {
+		// Port 0 means the client does not know its UDP port yet: leave the association
+		// pending, as for 0.0.0.0:0, and bind it to the first datagram's source.
+		if port := binary.BigEndian.Uint16(r.DstPort); port != 0 {
 			source = net.JoinHostPort(ip.String(), fmt.Sprint(port))
 		}
 	}
@@ -118,6 +119,9 @@ func (s *SOCKS5Server) claimUDPAssociation(addr *net.UDPAddr) (*udpAssociation, 
 	if a := s.associatedUDP[source]; a != nil {
 		return a, a.ctx.Err() == nil
 	}
+	// shortcut: a pending association is claimed by the first datagram from the TCP peer's IP
+	// (any port, once). Another local process or NAT-mates behind the same IP could race the
+	// real client; fixing needs the client to announce its UDP port, so upgrade only if clients allow it.
 	pending := s.pendingUDP[ip]
 	if len(pending) == 0 {
 		return nil, false
