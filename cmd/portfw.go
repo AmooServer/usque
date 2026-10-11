@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -319,7 +320,7 @@ var portFwCmd = &cobra.Command{
 // Returns:
 //   - error: An error if port forwarding fails; otherwise, nil.
 func forwardPort(netstackNet *netstack.Net, pm internal.PortMapping, isRemote bool) error {
-	localAddrPort, err := netip.ParseAddrPort(fmt.Sprintf("%s:%d", pm.BindAddress, pm.LocalPort))
+	localAddrPort, err := netip.ParseAddrPort(net.JoinHostPort(pm.BindAddress, fmt.Sprint(pm.LocalPort)))
 	if err != nil {
 		return fmt.Errorf("invalid local address: %w", err)
 	}
@@ -334,18 +335,12 @@ func forwardPort(netstackNet *netstack.Net, pm internal.PortMapping, isRemote bo
 
 		log.Printf("Remote forwarding: Listening on MASQUE network %s, forwarding to local %s:%d", localAddrPort, pm.RemoteIP, pm.RemotePort)
 
-		for {
-			conn, err := listener.Accept()
-			if err != nil {
-				log.Printf("Accept error on %s: %v", localAddrPort, err)
-				continue
-			}
-
-			go handleConnection(conn, pm, isRemote, netstackNet)
-		}
+		return acceptLoop(listener, localAddrPort.String(), func(conn net.Conn) {
+			handleConnection(conn, pm, isRemote, netstackNet)
+		})
 	} else {
 		// Local forwarding: Listen on local machine
-		listener, err := net.Listen("tcp", fmt.Sprintf("%s:%d", pm.BindAddress, pm.LocalPort))
+		listener, err := net.Listen("tcp", localAddrPort.String())
 		if err != nil {
 			return fmt.Errorf("failed to listen on %s:%d: %w", pm.BindAddress, pm.LocalPort, err)
 		}
@@ -353,15 +348,33 @@ func forwardPort(netstackNet *netstack.Net, pm internal.PortMapping, isRemote bo
 
 		log.Printf("Local forwarding: Listening on %s:%d, forwarding to remote %s:%d", pm.BindAddress, pm.LocalPort, pm.RemoteIP, pm.RemotePort)
 
-		for {
-			conn, err := listener.Accept()
-			if err != nil {
-				log.Printf("Accept error on %s:%d: %v", pm.BindAddress, pm.LocalPort, err)
-				continue
-			}
+		return acceptLoop(listener, localAddrPort.String(), func(conn net.Conn) {
+			handleConnection(conn, pm, isRemote, netstackNet)
+		})
+	}
+}
 
-			go handleConnection(conn, pm, isRemote, netstackNet)
+// acceptLoop serves each accepted connection in its own goroutine. It returns once the
+// listener is closed and backs off (up to 1s) on other Accept errors instead of spinning.
+func acceptLoop(listener net.Listener, name string, handle func(net.Conn)) error {
+	var delay time.Duration
+	for {
+		conn, err := listener.Accept()
+		if err != nil {
+			if errors.Is(err, net.ErrClosed) {
+				return fmt.Errorf("listener %s closed: %w", name, err)
+			}
+			log.Printf("Accept error on %s: %v", name, err)
+			if delay = delay * 2; delay == 0 {
+				delay = 5 * time.Millisecond
+			} else if delay > time.Second {
+				delay = time.Second
+			}
+			time.Sleep(delay)
+			continue
 		}
+		delay = 0
+		go handle(conn)
 	}
 }
 
@@ -375,7 +388,7 @@ func forwardPort(netstackNet *netstack.Net, pm internal.PortMapping, isRemote bo
 func handleConnection(localConn net.Conn, pm internal.PortMapping, isRemote bool, tunNet *netstack.Net) {
 	defer func() { _ = localConn.Close() }()
 
-	remoteAddrPort, err := netip.ParseAddrPort(fmt.Sprintf("%s:%d", pm.RemoteIP, pm.RemotePort))
+	remoteAddrPort, err := netip.ParseAddrPort(net.JoinHostPort(pm.RemoteIP, fmt.Sprint(pm.RemotePort)))
 	if err != nil {
 		log.Printf("Invalid remote address: %v", err)
 		return
@@ -396,7 +409,13 @@ func handleConnection(localConn net.Conn, pm internal.PortMapping, isRemote bool
 	}
 	defer func() { _ = remoteConn.Close() }()
 
-	go func() { _, _ = io.Copy(remoteConn, localConn) }()
+	go func() {
+		_, _ = io.Copy(remoteConn, localConn)
+		// Propagate local EOF so the remote can finish and reply instead of hanging.
+		if cw, ok := remoteConn.(interface{ CloseWrite() error }); ok {
+			_ = cw.CloseWrite()
+		}
+	}()
 	_, _ = io.Copy(localConn, remoteConn)
 }
 

@@ -146,23 +146,32 @@ func TestConcurrentUpdatesAndCloseBoundary(t *testing.T) {
 	}
 }
 
-func TestCorruptOrOversizedHistoryIsNotOverwritten(t *testing.T) {
+// assertQuarantined checks that an unusable history file starts an empty collector and survives as .bad.
+func assertQuarantined(t *testing.T, path string, data []byte) {
+	t.Helper()
+	c, err := New(path)
+	if err != nil {
+		t.Fatalf("invalid history blocked startup: %v", err)
+	}
+	if rows := c.Snapshot().Clients; len(rows) != 0 {
+		t.Fatalf("invalid history was loaded: %v", rows)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(path + ".bad")
+	if err != nil || string(got) != string(data) {
+		t.Fatalf("invalid history was not preserved as .bad: %v", err)
+	}
+}
+
+func TestCorruptOrOversizedHistoryIsQuarantined(t *testing.T) {
 	for _, data := range []string{"{bad", `{"schema_version":1,"clients":[{"ip":"invalid"}]}`, string(make([]byte, MaxBytes+1))} {
 		path := filepath.Join(t.TempDir(), "clients.json")
 		if err := os.WriteFile(path, []byte(data), 0640); err != nil {
 			t.Fatal(err)
 		}
-		if c, err := New(path); err == nil {
-			_ = c.Close()
-			t.Fatal("invalid history accepted")
-		}
-		got, err := os.ReadFile(path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if string(got) != data {
-			t.Fatal("invalid history overwritten")
-		}
+		assertQuarantined(t, path, []byte(data))
 	}
 }
 
@@ -179,7 +188,7 @@ func readSnapshot(t *testing.T, path string) Snapshot {
 	return s
 }
 
-func TestHistoryRejectsAmbiguousSchemaAndImpossibleTimes(t *testing.T) {
+func TestHistoryQuarantinesAmbiguousSchemaAndImpossibleTimes(t *testing.T) {
 	c, path := newTestCollector(t)
 	c.Begin("192.0.2.22", "tcp").End()
 	if err := c.Close(); err != nil {
@@ -224,17 +233,7 @@ func TestHistoryRejectsAmbiguousSchemaAndImpossibleTimes(t *testing.T) {
 			if err := os.WriteFile(target, data, 0640); err != nil {
 				t.Fatal(err)
 			}
-			if collector, err := New(target); err == nil {
-				_ = collector.Close()
-				t.Fatal("invalid history accepted")
-			}
-			after, err := os.ReadFile(target)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if string(after) != string(data) {
-				t.Fatal("rejected history was overwritten")
-			}
+			assertQuarantined(t, target, data)
 		})
 	}
 }

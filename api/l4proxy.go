@@ -51,7 +51,15 @@ type L4Proxy struct {
 	connectRetryCount int
 	connMu            sync.Mutex
 	client            *l4HTTP3Client
+	dialing           *l4ClientDial // in-flight client dial, guarded by connMu
 	dialFn            func(context.Context, string) (*l4TCPConn, error)
+}
+
+// l4ClientDial lets concurrent callers share one in-flight QUIC dial.
+type l4ClientDial struct {
+	done   chan struct{}
+	client *l4HTTP3Client
+	err    error
 }
 
 type l4HTTP3Client struct {
@@ -270,14 +278,45 @@ func shouldReconnectOnOpenStreamError(ctx context.Context, err error) bool {
 }
 
 func (p *L4Proxy) getOrCreateClientConn(ctx context.Context) (*l4HTTP3Client, error) {
-	p.connMu.Lock()
-	if p.client != nil {
-		client := p.client
+	for {
+		p.connMu.Lock()
+		if p.client != nil {
+			client := p.client
+			p.connMu.Unlock()
+			return client, nil
+		}
+		if d := p.dialing; d != nil {
+			p.connMu.Unlock()
+			select {
+			case <-d.done:
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+			// The leader's own cancellation says nothing about this caller; retry in that case.
+			if d.err != nil && ctx.Err() == nil && (errors.Is(d.err, context.Canceled) || errors.Is(d.err, context.DeadlineExceeded)) {
+				continue
+			}
+			return d.client, d.err
+		}
+		d := &l4ClientDial{done: make(chan struct{})}
+		p.dialing = d
 		p.connMu.Unlock()
-		return client, nil
-	}
-	p.connMu.Unlock()
 
+		client, err := p.dialClientConn(ctx)
+
+		p.connMu.Lock()
+		if err == nil {
+			p.client = client
+		}
+		p.dialing = nil
+		p.connMu.Unlock()
+		d.client, d.err = client, err
+		close(d.done)
+		return client, err
+	}
+}
+
+func (p *L4Proxy) dialClientConn(ctx context.Context) (*l4HTTP3Client, error) {
 	udpConn, err := listenUDPForEndpoint(p.endpoint)
 	if err != nil {
 		return nil, err
@@ -291,23 +330,11 @@ func (p *L4Proxy) getOrCreateClientConn(ctx context.Context) (*l4HTTP3Client, er
 		return nil, err
 	}
 
-	newClient := &l4HTTP3Client{
+	return &l4HTTP3Client{
 		udpConn:    udpConn,
 		quicConn:   quicConn,
 		clientConn: (&http3.Transport{}).NewClientConn(quicConn),
-	}
-
-	p.connMu.Lock()
-	if p.client != nil {
-		current := p.client
-		p.connMu.Unlock()
-		closeL4HTTP3(newClient.udpConn, newClient.quicConn)
-		return current, nil
-	}
-	p.client = newClient
-	p.connMu.Unlock()
-
-	return newClient, nil
+	}, nil
 }
 
 func (p *L4Proxy) closeClientConnIfCurrent(expected *l4HTTP3Client) {

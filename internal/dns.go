@@ -73,11 +73,11 @@ func (r TunnelDNSResolver) Resolve(ctx context.Context, name string) (net.IP, er
 			var dialFunc func(context.Context, string, string) (net.Conn, error)
 			if r.TunNet != nil {
 				dialFunc = func(ctx context.Context, network, address string) (net.Conn, error) {
-					return r.TunNet.DialContext(ctx, "udp", dnsHost)
+					return r.TunNet.DialContext(ctx, network, dnsHost)
 				}
 			} else {
 				dialFunc = func(ctx context.Context, network, address string) (net.Conn, error) {
-					return (&net.Dialer{}).DialContext(ctx, "udp", dnsHost)
+					return (&net.Dialer{}).DialContext(ctx, network, dnsHost)
 				}
 			}
 
@@ -128,7 +128,7 @@ func NewNetstackResolver(tunNet *netstack.Net, dnsAddrs []netip.Addr) *net.Resol
 				return nil, fmt.Errorf("no DNS servers configured")
 			}
 			dnsHost := net.JoinHostPort(dnsAddrs[0].String(), "53")
-			return tunNet.DialContext(ctx, "udp", dnsHost)
+			return tunNet.DialContext(ctx, network, dnsHost)
 		},
 	}
 }
@@ -142,7 +142,7 @@ func NewStaticResolver(dnsAddrs []netip.Addr) *net.Resolver {
 				return nil, fmt.Errorf("no DNS servers configured")
 			}
 			dnsHost := net.JoinHostPort(dnsAddrs[0].String(), "53")
-			return (&net.Dialer{}).DialContext(ctx, "udp", dnsHost)
+			return (&net.Dialer{}).DialContext(ctx, network, dnsHost)
 		},
 	}
 }

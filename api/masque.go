@@ -7,6 +7,7 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -102,11 +103,11 @@ func PrepareTlsConfig(privKey *ecdsa.PrivateKey, peerPubKey *ecdsa.PublicKey, ce
 //
 // Returns:
 //   - *net.UDPConn: The UDP connection used for the QUIC session (nil in HTTP/2 mode).
-//   - *http3.Transport: The HTTP/3 transport (nil in HTTP/2 mode).
+//   - io.Closer: Releases the transport: the HTTP/3 transport, or in HTTP/2 mode the client's idle connections. Close it after the Connect-IP connection.
 //   - *connectip.Conn: The Connect-IP connection instance.
 //   - *http.Response: The response from the Connect-IP handshake.
 //   - error: An error if the connection setup fails.
-func ConnectTunnel(ctx context.Context, tlsConfig *tls.Config, quicConfig *quic.Config, connectUri string, endpoint net.Addr, useHTTP2 bool) (*net.UDPConn, *http3.Transport, *connectip.Conn, *http.Response, error) {
+func ConnectTunnel(ctx context.Context, tlsConfig *tls.Config, quicConfig *quic.Config, connectUri string, endpoint net.Addr, useHTTP2 bool) (*net.UDPConn, io.Closer, *connectip.Conn, *http.Response, error) {
 	template := uritemplate.MustNew(connectUri)
 	additionalHeaders := http.Header{
 		"User-Agent": []string{""},
@@ -130,12 +131,13 @@ func ConnectTunnel(ctx context.Context, tlsConfig *tls.Config, quicConfig *quic.
 
 		ipConn, rsp, err := connectip.DialH2(ctx, h2Client, template, h2Headers)
 		if err != nil {
+			h2Client.CloseIdleConnections()
 			if strings.Contains(err.Error(), "tls: access denied") {
 				return nil, nil, nil, nil, errors.New("login failed! Please double-check if your tls key and cert is enrolled in the Cloudflare Access service")
 			}
 			return nil, nil, nil, nil, fmt.Errorf("failed to dial connect-ip over HTTP/2: %w", err)
 		}
-		return nil, nil, ipConn, rsp, nil
+		return nil, closerFunc(func() error { h2Client.CloseIdleConnections(); return nil }), ipConn, rsp, nil
 	}
 
 	quicEndpoint, ok := endpoint.(*net.UDPAddr)
@@ -159,6 +161,11 @@ func ConnectTunnel(ctx context.Context, tlsConfig *tls.Config, quicConfig *quic.
 	}
 	return nil, nil, nil, nil, fmt.Errorf("failed to dial connect-ip: %w", lastErr)
 }
+
+// closerFunc adapts a function to io.Closer.
+type closerFunc func() error
+
+func (f closerFunc) Close() error { return f() }
 
 func connectTunnelHTTP3(ctx context.Context, tlsConfig *tls.Config, quicConfig *quic.Config, template *uritemplate.Template, additionalHeaders http.Header, endpoint *net.UDPAddr) (*net.UDPConn, *http3.Transport, *connectip.Conn, *http.Response, error) {
 	var udpConn *net.UDPConn

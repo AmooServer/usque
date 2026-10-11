@@ -154,13 +154,9 @@ func DefaultQuicConfig(keepalivePeriod time.Duration, initialPacketSize uint16) 
 //   - int: The remote port.
 //   - error: An error if parsing fails.
 func parsePortMapping(port string) (bindAddress string, localPort int, remoteHost string, remotePort int, err error) {
-	parts := strings.Split(port, ":")
+	parts := splitOutsideBrackets(port)
 
-	// Handle IPv6 addresses (which are enclosed in brackets)
-	if len(parts) >= 4 && strings.HasPrefix(parts[0], "[") && strings.Contains(parts[0], "]") {
-		bindAddress = parts[0]
-		parts = parts[1:] // Shift parts forward
-	} else if len(parts) == 3 {
+	if len(parts) == 3 {
 		bindAddress = "localhost" // Default to localhost
 	} else if len(parts) == 4 {
 		bindAddress = parts[0]
@@ -176,7 +172,7 @@ func parsePortMapping(port string) (bindAddress string, localPort int, remoteHos
 	}
 
 	// Validate remote host (allow both hostnames and IPs)
-	remoteHost = parts[1]
+	remoteHost = strings.Trim(parts[1], "[]")
 	if net.ParseIP(remoteHost) == nil && !isValidHostname(remoteHost) {
 		return "", 0, "", 0, errors.New("invalid remote hostname/IP")
 	}
@@ -209,6 +205,28 @@ func parsePortMapping(port string) (bindAddress string, localPort int, remoteHos
 	}
 
 	return bindAddress, localPort, remoteHost, remotePort, nil
+}
+
+// splitOutsideBrackets splits s on ':' except inside [...] so bracketed IPv6 hosts stay whole.
+func splitOutsideBrackets(s string) []string {
+	var parts []string
+	depth, start := 0, 0
+	for i, c := range s {
+		switch c {
+		case '[':
+			depth++
+		case ']':
+			if depth > 0 {
+				depth--
+			}
+		case ':':
+			if depth == 0 {
+				parts = append(parts, s[start:i])
+				start = i + 1
+			}
+		}
+	}
+	return append(parts, s[start:])
 }
 
 // ParsePortMapping parses a port mapping string into a structured PortMapping.
@@ -244,7 +262,7 @@ func ParsePortMapping(port string) (PortMapping, error) {
 //   - string: The resolved IP address.
 //   - error:  An error if resolution fails.
 func resolveBindAddress(addr string) (string, error) {
-	tcpAddr, err := net.ResolveTCPAddr("tcp", addr+":0") // Resolve the address
+	tcpAddr, err := net.ResolveTCPAddr("tcp", net.JoinHostPort(addr, "0")) // Resolve the address
 	if err != nil {
 		return "", err
 	}

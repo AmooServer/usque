@@ -2,18 +2,23 @@ package cmd
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
 	"fmt"
 	"io"
 	"log"
 	"net"
 	"net/http"
 	"net/netip"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/Diniboy1123/usque/api"
 	"github.com/Diniboy1123/usque/config"
 	"github.com/Diniboy1123/usque/internal"
 	"github.com/spf13/cobra"
+	"golang.org/x/net/netutil"
 	"golang.zx2c4.com/wireguard/tun/netstack"
 )
 
@@ -234,8 +239,18 @@ var httpProxyCmd = &cobra.Command{
 			"USQUE_IPV6": config.AppConfig.IPv6,
 		}
 
+		if err := checkCredentialPair(username, password); err != nil {
+			cmd.Println(err)
+			return
+		}
+		maxConns, err := cmd.Flags().GetInt("max-connections")
+		if err != nil {
+			cmd.Printf("Failed to get max-connections flag: %v\n", err)
+			return
+		}
+
 		var authHeader string
-		if username != "" && password != "" {
+		if username != "" {
 			authHeader = "Basic " + internal.LoginToBase64(username, password)
 		}
 
@@ -266,9 +281,7 @@ var httpProxyCmd = &cobra.Command{
 		server := &http.Server{
 			Addr: net.JoinHostPort(bindAddress, port),
 			Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if !authenticate(r, authHeader) {
-					w.Header().Set("Proxy-Authenticate", `Basic realm="Proxy"`)
-					http.Error(w, "Proxy authentication required", http.StatusProxyAuthRequired)
+				if !proxyAuthorized(w, r, authHeader) {
 					return
 				}
 
@@ -281,7 +294,7 @@ var httpProxyCmd = &cobra.Command{
 		}
 
 		log.Printf("HTTP proxy listening on %s:%s\n", bindAddress, port)
-		if err := server.ListenAndServe(); err != nil {
+		if err := serveHTTPProxy(server, maxConns); err != nil {
 			cmd.Printf("Failed to start HTTP proxy: %v\n", err)
 		}
 	},
@@ -291,13 +304,114 @@ var httpProxyCmd = &cobra.Command{
 //
 // Parameters:
 //   - r: *http.Request - The incoming HTTP request.
-//   - expectedAuth: string - The expected authorization token.
+//   - expectedAuth: string - The expected authorization token; empty disables authentication.
 //
 // Returns:
 //   - bool: True if the authorization header matches the expected value, otherwise false.
 func authenticate(r *http.Request, expectedAuth string) bool {
-	authHeader := r.Header.Get("Proxy-Authorization")
-	return authHeader == expectedAuth
+	if expectedAuth == "" {
+		return true
+	}
+	// Compare fixed-length digests so neither content nor length leaks through timing.
+	got := sha256.Sum256([]byte(r.Header.Get("Proxy-Authorization")))
+	want := sha256.Sum256([]byte(expectedAuth))
+	return subtle.ConstantTimeCompare(got[:], want[:]) == 1
+}
+
+const (
+	authMaxFailures = 10
+	authFailWindow  = time.Minute
+)
+
+type authFail struct {
+	n     int
+	since time.Time
+}
+
+var authFailures = struct {
+	sync.Mutex
+	m map[string]*authFail
+}{m: map[string]*authFail{}}
+
+// authBlocked reports whether ip has reached the failed-credential limit in the current window.
+func authBlocked(ip string) bool {
+	authFailures.Lock()
+	defer authFailures.Unlock()
+	f := authFailures.m[ip]
+	return f != nil && time.Since(f.since) < authFailWindow && f.n >= authMaxFailures
+}
+
+// authFailed records a rejected credential from ip.
+func authFailed(ip string) {
+	authFailures.Lock()
+	defer authFailures.Unlock()
+	if len(authFailures.m) > 4096 { // bound memory under spoofed or many-source floods
+		for k, f := range authFailures.m {
+			if time.Since(f.since) >= authFailWindow {
+				delete(authFailures.m, k)
+			}
+		}
+	}
+	f := authFailures.m[ip]
+	if f == nil || time.Since(f.since) >= authFailWindow {
+		f = &authFail{since: time.Now()}
+		authFailures.m[ip] = f
+	}
+	f.n++
+}
+
+// proxyAuthorized enforces proxy authentication and writes the rejection response when it fails.
+// Wrong credentials are throttled per source IP; a missing header (normal first challenge) is not counted.
+func proxyAuthorized(w http.ResponseWriter, r *http.Request, expectedAuth string) bool {
+	if expectedAuth == "" {
+		return true
+	}
+	ip, _, _ := net.SplitHostPort(r.RemoteAddr)
+	if authBlocked(ip) {
+		http.Error(w, "Too many failed authentication attempts", http.StatusTooManyRequests)
+		return false
+	}
+	if authenticate(r, expectedAuth) {
+		return true
+	}
+	if r.Header.Get("Proxy-Authorization") != "" {
+		authFailed(ip)
+	}
+	w.Header().Set("Proxy-Authenticate", `Basic realm="Proxy"`)
+	http.Error(w, "Proxy authentication required", http.StatusProxyAuthRequired)
+	return false
+}
+
+// serveHTTPProxy serves on server.Addr with header/idle timeouts and a connection cap
+// (maxConns 0 uses internal.DefaultMaxConns, negative means unlimited). Read/Write timeouts are deliberately unset so
+// long-lived CONNECT tunnels and streamed responses are not cut.
+func serveHTTPProxy(server *http.Server, maxConns int) error {
+	server.ReadHeaderTimeout = 30 * time.Second
+	server.IdleTimeout = 2 * time.Minute
+	ln, err := net.Listen("tcp", server.Addr)
+	if err != nil {
+		return err
+	}
+	if maxConns == 0 {
+		maxConns = internal.DefaultMaxConns
+	}
+	if maxConns > 0 {
+		ln = netutil.LimitListener(ln, maxConns)
+	}
+	return server.Serve(ln)
+}
+
+// removeProxyHeaders drops credentials and hop-by-hop headers (including any named by
+// Connection) that must not be forwarded to the origin server.
+func removeProxyHeaders(h http.Header) {
+	for _, f := range h.Values("Connection") {
+		for _, name := range strings.Split(f, ",") {
+			h.Del(strings.TrimSpace(name))
+		}
+	}
+	for _, name := range []string{"Connection", "Proxy-Connection", "Proxy-Authorization", "Proxy-Authenticate", "Keep-Alive", "Te", "Trailer", "Transfer-Encoding", "Upgrade"} {
+		h.Del(name)
+	}
 }
 
 // handleHTTPSConnect establishes a tunnel to the destination using the provided resolver.
@@ -355,12 +469,25 @@ func handleHTTPSConnect(w http.ResponseWriter, r *http.Request, tunNet *netstack
 		return
 	}
 
-	go func() {
-		defer func() { _ = destConn.Close() }()
-		defer func() { _ = clientConn.Close() }()
-		_, _ = io.Copy(destConn, clientConn)
-	}()
-	_, _ = io.Copy(clientConn, destConn)
+	// When either direction ends, half-close its peer, give the other direction a
+	// bounded grace period to drain, then close both so nothing leaks.
+	done := make(chan struct{}, 2)
+	pipe := func(dst, src net.Conn) {
+		_, _ = io.Copy(dst, src)
+		if cw, ok := dst.(interface{ CloseWrite() error }); ok {
+			_ = cw.CloseWrite()
+		}
+		done <- struct{}{}
+	}
+	go pipe(destConn, clientConn)
+	go pipe(clientConn, destConn)
+	<-done
+	select {
+	case <-done:
+	case <-time.After(30 * time.Second):
+	}
+	_ = clientConn.Close()
+	_ = destConn.Close()
 }
 
 // handleHTTPProxy forwards HTTP proxy requests to the destination and relays responses back to the client using the provided resolver.
@@ -371,29 +498,29 @@ func handleHTTPSConnect(w http.ResponseWriter, r *http.Request, tunNet *netstack
 //   - tunNet: *netstack.Net - The netstack network interface.
 //   - resolver: *net.Resolver - The DNS resolver to use for the tunnel.
 func handleHTTPProxy(w http.ResponseWriter, r *http.Request, tunNet *netstack.Net, resolver *net.Resolver) {
-	client := &http.Client{
-		Transport: &http.Transport{
-			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-				host, port, err := net.SplitHostPort(addr)
-				if err != nil {
-					return nil, fmt.Errorf("invalid address: %w", err)
-				}
+	transport := &http.Transport{
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			host, port, err := net.SplitHostPort(addr)
+			if err != nil {
+				return nil, fmt.Errorf("invalid address: %w", err)
+			}
 
-				var dialAddr string
-				if resolver != nil {
-					ips, err := resolver.LookupIP(ctx, "ip", host)
-					if err != nil || len(ips) == 0 {
-						return nil, fmt.Errorf("DNS resolution failed for %s: %w", host, err)
-					}
-					dialAddr = net.JoinHostPort(ips[0].String(), port)
-				} else {
-					dialAddr = addr
+			var dialAddr string
+			if resolver != nil {
+				ips, err := resolver.LookupIP(ctx, "ip", host)
+				if err != nil || len(ips) == 0 {
+					return nil, fmt.Errorf("DNS resolution failed for %s: %w", host, err)
 				}
+				dialAddr = net.JoinHostPort(ips[0].String(), port)
+			} else {
+				dialAddr = addr
+			}
 
-				return tunNet.DialContext(ctx, network, dialAddr)
-			},
+			return tunNet.DialContext(ctx, network, dialAddr)
 		},
 	}
+	defer transport.CloseIdleConnections()
+	client := &http.Client{Transport: transport}
 
 	req, err := http.NewRequestWithContext(r.Context(), r.Method, r.URL.String(), r.Body)
 	if err != nil {
@@ -401,6 +528,7 @@ func handleHTTPProxy(w http.ResponseWriter, r *http.Request, tunNet *netstack.Ne
 		return
 	}
 	req.Header = r.Header.Clone()
+	removeProxyHeaders(req.Header)
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -432,6 +560,7 @@ func init() {
 	httpProxyCmd.Flags().StringP("port", "p", "8000", "Port to listen on for HTTP proxy")
 	httpProxyCmd.Flags().StringP("username", "u", "", "Username for proxy authentication (specify both username and password to enable)")
 	httpProxyCmd.Flags().StringP("password", "w", "", "Password for proxy authentication (specify both username and password to enable)")
+	httpProxyCmd.Flags().Int("max-connections", internal.DefaultMaxConns, "Maximum concurrent client connections (0 = default, negative = unlimited)")
 	httpProxyCmd.Flags().IntP("connect-port", "P", 443, "Used port for MASQUE connection")
 	httpProxyCmd.Flags().StringArrayP("dns", "d", []string{"9.9.9.9", "149.112.112.112", "2620:fe::fe", "2620:fe::9"}, "DNS servers for the tunnel stack; with -l also used for proxy name lookups (unless --system-dns)")
 	httpProxyCmd.Flags().DurationP("dns-timeout", "t", 2*time.Second, "Timeout for DNS queries")

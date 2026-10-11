@@ -49,6 +49,7 @@ var l4SocksCmd = &cobra.Command{
 			DialTimeout: dialTimeout,
 			Logger:      log.Default(),
 			ClientStats: collector,
+			MaxConns:    opts.maxConns,
 		})
 		if err != nil {
 			return fmt.Errorf("failed to create SOCKS proxy: %w", err)
