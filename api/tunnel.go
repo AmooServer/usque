@@ -241,6 +241,10 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
 		packetDiagnostics = &loopbackPacketObserver{localAddresses: append([]netip.Addr(nil), cfg.LocalAddresses...)}
 	}
 
+	// readMu serializes TUN reads across reconnect cycles, so a stale reader parked from
+	// a previous cycle cannot steal packets from the idle wait or the next pump.
+	var readMu sync.Mutex
+
 	for {
 		if ctx.Err() != nil {
 			return
@@ -249,7 +253,9 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
 		if !cfg.AlwaysReconnect {
 			log.Println("Tunnel idle. Waiting for outbound activity before reconnecting...")
 			buf := packetBufferPool.Get()
+			readMu.Lock()
 			n, err := cfg.Device.ReadPacket(buf[datagramContextIDHeadroom:])
+			readMu.Unlock()
 			if err != nil {
 				packetBufferPool.Put(buf)
 				log.Printf("Failed to read from TUN device while waiting for activity: %v", err)
@@ -314,7 +320,6 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
 		errChan := make(chan error, 2)
 		pumpCtx, cancelPumps := context.WithCancel(ctx)
 		var wg sync.WaitGroup
-		var readMu sync.Mutex
 
 		wg.Add(2)
 
@@ -390,8 +395,13 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
 			}
 		}()
 
-		err = <-errChan
-		log.Printf("Tunnel connection lost: %v. Reconnecting...", err)
+		// Honor cancellation while connected: fall through to the same teardown as a lost connection.
+		select {
+		case err = <-errChan:
+			log.Printf("Tunnel connection lost: %v. Reconnecting...", err)
+		case <-ctx.Done():
+			log.Println("Tunnel stopped: context cancelled")
+		}
 
 		if cfg.OnDisconnect != "" {
 			env := cloneHookEnv(cfg.HookEnv)
