@@ -90,22 +90,31 @@ func New(path string) (*Collector, error) {
 	if err == nil {
 		data, readErr := io.ReadAll(io.LimitReader(f, MaxBytes+1))
 		_ = f.Close()
-		if readErr != nil || len(data) > MaxBytes {
+		if readErr != nil {
 			return nil, safeError()
 		}
-		old, decodeErr := decodeSnapshot(data)
+		var old Snapshot
+		decodeErr := errors.New("oversized")
+		if len(data) <= MaxBytes {
+			old, decodeErr = decodeSnapshot(data)
+		}
 		if decodeErr != nil || validateSnapshot(old) != nil {
-			return nil, safeError()
-		}
-		c.state.MonitoredSince = old.MonitoredSince
-		c.state.CapacityReached = old.CapacityReached
-		c.state.Overflow = old.Overflow
-		c.state.ProcessStartedAt = max(now, old.UpdatedAt)
-		c.state.UpdatedAt = c.state.ProcessStartedAt
-		for _, row := range old.Clients {
-			row.ActiveTCP = 0
-			row.ActiveUDP = 0
-			c.clients[row.IP] = &row
+			// An invalid or future-dated history must not block startup: keep it aside and start empty.
+			log.Print("SOCKS client statistics history is invalid; moved aside as .bad and starting empty")
+			if os.Rename(path, path+".bad") != nil {
+				return nil, safeError()
+			}
+		} else {
+			c.state.MonitoredSince = old.MonitoredSince
+			c.state.CapacityReached = old.CapacityReached
+			c.state.Overflow = old.Overflow
+			c.state.ProcessStartedAt = max(now, old.UpdatedAt)
+			c.state.UpdatedAt = c.state.ProcessStartedAt
+			for _, row := range old.Clients {
+				row.ActiveTCP = 0
+				row.ActiveUDP = 0
+				c.clients[row.IP] = &row
+			}
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return nil, safeError()
