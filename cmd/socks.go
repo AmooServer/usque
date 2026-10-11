@@ -182,6 +182,10 @@ var socksCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
+		maxConns, err := cmd.Flags().GetInt("max-connections")
+		if err != nil {
+			return fmt.Errorf("failed to get max-connections flag: %w", err)
+		}
 
 		reconnectDelay, err := cmd.Flags().GetDuration("reconnect-delay")
 		if err != nil {
@@ -267,6 +271,7 @@ var socksCmd = &cobra.Command{
 			DialTimeout: dialTimeout,
 			Logger:      log.New(internal.NewTZStampWriter(os.Stderr), "socks5: ", 0),
 			ClientStats: collector,
+			MaxConns:    maxConns,
 		})
 		if err != nil {
 			return fmt.Errorf("failed to create SOCKS proxy: %w", err)
@@ -280,6 +285,7 @@ var socksCmd = &cobra.Command{
 }
 
 func init() {
+	socksCmd.Flags().Int("max-connections", internal.DefaultMaxConns, "Maximum concurrent client connections (0 = default, negative = unlimited)")
 	socksCmd.Flags().StringP("bind", "b", "0.0.0.0", "Address to bind the SOCKS proxy to")
 	socksCmd.Flags().StringP("port", "p", "1080", "Port to listen on for SOCKS proxy")
 	socksCmd.Flags().StringP("username", "u", "", "Username for proxy authentication (specify both username and password to enable)")

@@ -30,6 +30,7 @@ type l4ProxyOptions struct {
 	systemDNS         bool
 	onConnect         string
 	onDisconnect      string
+	maxConns          int
 }
 
 func buildL4Proxy(cmd *cobra.Command, mode string) (l4ProxyOptions, *api.L4Proxy, error) {
@@ -56,6 +57,12 @@ func buildL4Proxy(cmd *cobra.Command, mode string) (l4ProxyOptions, *api.L4Proxy
 		if opts.username, opts.password, err = socksCredentials(cmd); err != nil {
 			return opts, nil, err
 		}
+	}
+	if err := checkCredentialPair(opts.username, opts.password); err != nil {
+		return opts, nil, err
+	}
+	if opts.maxConns, err = cmd.Flags().GetInt("max-connections"); err != nil {
+		return opts, nil, fmt.Errorf("failed to get max-connections flag: %v", err)
 	}
 	if opts.connectPort, err = cmd.Flags().GetInt("connect-port"); err != nil {
 		return opts, nil, fmt.Errorf("failed to get connect port: %v", err)
@@ -210,6 +217,7 @@ func addL4ProxyFlags(cmd *cobra.Command, defaultPort, proxyName string) {
 	cmd.Flags().StringP("port", "p", defaultPort, "Port to listen on for "+proxyName+" proxy")
 	cmd.Flags().StringP("username", "u", "", "Username for proxy authentication (specify both username and password to enable)")
 	cmd.Flags().StringP("password", "w", "", "Password for proxy authentication (specify both username and password to enable)")
+	cmd.Flags().Int("max-connections", internal.DefaultMaxConns, "Maximum concurrent client connections (0 = default, negative = unlimited)")
 	cmd.Flags().IntP("connect-port", "P", 443, "Used port for MASQUE connection")
 	cmd.Flags().StringArrayP("dns", "d", []string{"9.9.9.9", "149.112.112.112", "2620:fe::fe", "2620:fe::9"}, "DNS servers for local proxy name lookups with -l (unless --system-dns)")
 	cmd.Flags().DurationP("dns-timeout", "t", 2*time.Second, "Timeout for DNS queries")

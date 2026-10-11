@@ -26,16 +26,14 @@ var l4HTTPProxyCmd = &cobra.Command{
 		}
 
 		var authHeader string
-		if opts.username != "" && opts.password != "" {
+		if opts.username != "" {
 			authHeader = "Basic " + internal.LoginToBase64(opts.username, opts.password)
 		}
 
 		server := &http.Server{
 			Addr: net.JoinHostPort(opts.bind, opts.port),
 			Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if authHeader != "" && r.Header.Get("Proxy-Authorization") != authHeader {
-					w.Header().Set("Proxy-Authenticate", `Basic realm="Proxy"`)
-					http.Error(w, "Proxy authentication required", http.StatusProxyAuthRequired)
+				if !proxyAuthorized(w, r, authHeader) {
 					return
 				}
 				if r.Method == http.MethodConnect {
@@ -47,7 +45,7 @@ var l4HTTPProxyCmd = &cobra.Command{
 		}
 
 		log.Printf("L4 HTTP proxy listening on %s", server.Addr)
-		if err := server.ListenAndServe(); err != nil {
+		if err := serveHTTPProxy(server, opts.maxConns); err != nil {
 			cmd.Printf("Failed to start HTTP proxy: %v\n", err)
 		}
 	},
@@ -106,8 +104,7 @@ func handleL4HTTPForward(w http.ResponseWriter, r *http.Request, proxy *api.L4Pr
 		req.URL.Host = req.Host
 	}
 	req.Header = r.Header.Clone()
-	req.Header.Del("Proxy-Authorization")
-	req.Header.Del("Proxy-Connection")
+	removeProxyHeaders(req.Header)
 
 	resp, err := transport.RoundTrip(req)
 	if err != nil {

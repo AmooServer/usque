@@ -34,7 +34,11 @@ type SOCKS5Config struct {
 	UDPTimeout  time.Duration // 0 = no deadline on remote UDP reads
 	Logger      *log.Logger
 	ClientStats *clientstats.Collector // Optional authenticated client payload monitoring.
+	MaxConns    int                    // Concurrent TCP connections; 0 uses DefaultMaxConns, negative is unlimited.
 }
+
+// DefaultMaxConns is the generous default cap on concurrent proxy client connections.
+const DefaultMaxConns = 4096
 
 // SOCKS5Server wraps the SOCKS5 protocol parser with server-local dialers and associations.
 type SOCKS5Server struct {
@@ -67,6 +71,12 @@ func NewSOCKS5Server(cfg SOCKS5Config) (*SOCKS5Server, error) {
 	}
 	if cfg.Logger == nil {
 		cfg.Logger = log.Default()
+	}
+	if (cfg.Username == "") != (cfg.Password == "") {
+		return nil, errors.New("socks5: Username and Password must be set together")
+	}
+	if cfg.MaxConns == 0 {
+		cfg.MaxConns = DefaultMaxConns
 	}
 
 	// BND.ADDR for UDP ASSOCIATE is set in TCPHandle via c.LocalAddr(), not here.
@@ -154,6 +164,10 @@ func (s *SOCKS5Server) listenAndServe() error {
 	if err != nil {
 		return err
 	}
+	var connSem chan struct{}
+	if s.cfg.MaxConns > 0 {
+		connSem = make(chan struct{}, s.cfg.MaxConns)
+	}
 	srv.RunnerGroup.Add(&runnergroup.Runner{
 		Start: func() error {
 			for {
@@ -161,7 +175,20 @@ func (s *SOCKS5Server) listenAndServe() error {
 				if err != nil {
 					return err
 				}
-				go s.serveTCP(c)
+				if connSem != nil {
+					select {
+					case connSem <- struct{}{}:
+					default:
+						_ = c.Close()
+						continue
+					}
+				}
+				go func() {
+					if connSem != nil {
+						defer func() { <-connSem }()
+					}
+					s.serveTCP(c)
+				}()
 			}
 		},
 		Stop: func() error {
